@@ -1,0 +1,18 @@
+id: wp-bar-plugin
+
+info:
+  name: WordPress Bar Plugin Detection
+  author: tester
+  severity: info
+  tags:
+    - wordpress
+    - bar
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/wp-content/plugins/bar-baz/readme.txt"
+    matchers:
+      - type: status
+        status:
+          - 200
