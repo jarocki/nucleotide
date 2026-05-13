@@ -1,0 +1,20 @@
+id: wp-foo-plugin
+
+info:
+  name: WordPress Foo Plugin Detection
+  author: tester
+  severity: info
+  tags: wordpress,foo,plugin
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/wp-content/plugins/foo-bar/readme.txt"
+    headers:
+      User-Agent: "FooScanner/1.0"
+      X-Foo-Probe: "alpha"
+    body: ""
+    matchers:
+      - type: word
+        words:
+          - "Foo Bar Plugin"

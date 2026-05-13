@@ -1,0 +1,21 @@
+id: api-quux-leak
+
+info:
+  name: Quux API Token Leak
+  author: tester
+  severity: high
+  tags: api,quux
+
+http:
+  - raw:
+      - |
+        POST /api/v3/quux/echo HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/json
+        User-Agent: QuuxProbe/2.1
+
+        {"token":"AAAA-BBBB"}
+    matchers:
+      - type: word
+        words:
+          - "QUUX_TOKEN"
