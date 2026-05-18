@@ -13,6 +13,13 @@ import hashlib
 import re
 from typing import Any
 
+from .payload import (
+    COOKIE_HEADER_RE,
+    find_oast_injections,
+    parse_cookie_header,
+    parse_raw_request,
+)
+
 UA_HEADER_RE = re.compile(r"(?i)^user-agent$")
 
 
@@ -94,31 +101,70 @@ def _maybe_ja4(template: dict) -> str | None:
 def extract_fingerprints(template: dict) -> dict[str, Any]:
     fp: dict[str, Any] = {}
     user_agents: set[str] = set()
-    custom_headers: list[tuple[str, str]] = []
+    # Triples of (request_index, header_name, header_value) in original order.
+    ordered_headers: list[tuple[int, str, str]] = []
     bodies: list[str] = []
     raws: list[str] = []
     methods: set[str] = set()
+    cookies: list[tuple[str, str]] = []
+    oast: list[dict[str, str]] = []
 
-    for req in _iter_http_requests(template):
+    for ri, req in enumerate(_iter_http_requests(template)):
         m = req.get("method")
         if isinstance(m, str):
             methods.add(m.upper())
+
         headers = req.get("headers") or {}
         if isinstance(headers, dict):
             for hk, hv in headers.items():
                 if not isinstance(hk, str):
                     continue
                 value = "" if hv is None else str(hv)
-                if UA_HEADER_RE.match(hk):
-                    if value.strip():
-                        user_agents.add(value.strip())
-                custom_headers.append((hk, value))
+                ordered_headers.append((ri, hk, value))
+                if UA_HEADER_RE.match(hk) and value.strip():
+                    user_agents.add(value.strip())
+                if COOKIE_HEADER_RE.match(hk):
+                    cookies.extend(parse_cookie_header(value))
+                oast.extend(
+                    find_oast_injections(value, f"http[{ri}].header:{hk}")
+                )
+
         body = req.get("body")
         if isinstance(body, str) and body:
             bodies.append(body)
-        for raw in req.get("raw") or []:
-            if isinstance(raw, str):
-                raws.append(raw)
+            oast.extend(find_oast_injections(body, f"http[{ri}].body"))
+
+        for path_val in req.get("path") or []:
+            if isinstance(path_val, str):
+                oast.extend(find_oast_injections(path_val, f"http[{ri}].path"))
+
+        for raw_idx, raw in enumerate(req.get("raw") or []):
+            if not isinstance(raw, str):
+                continue
+            raws.append(raw)
+            parsed = parse_raw_request(raw)
+            if not parsed:
+                continue
+            if parsed.get("method"):
+                methods.add(str(parsed["method"]).upper())
+            for hk, hv in parsed.get("headers") or []:
+                ordered_headers.append((ri, hk, hv))
+                if UA_HEADER_RE.match(hk) and hv.strip():
+                    user_agents.add(hv.strip())
+                if COOKIE_HEADER_RE.match(hk):
+                    cookies.extend(parse_cookie_header(hv))
+                oast.extend(
+                    find_oast_injections(
+                        hv, f"http[{ri}].raw[{raw_idx}].header:{hk}"
+                    )
+                )
+            raw_body = parsed.get("body") or ""
+            if raw_body:
+                oast.extend(
+                    find_oast_injections(
+                        raw_body, f"http[{ri}].raw[{raw_idx}].body"
+                    )
+                )
 
     byte_sigs: list[str] = []
     for n in _iter_network_blocks(template):
@@ -132,6 +178,7 @@ def extract_fingerprints(template: dict) -> dict[str, Any]:
                 byte_sigs.append("hex:" + re.sub(r"\s+", "", data).lower())
             else:
                 byte_sigs.append(f"str:{_sha(data.encode())}")
+            oast.extend(find_oast_injections(data, "network.input"))
 
     tls_hints: dict[str, Any] = {}
     ssl_block = template.get("ssl") or []
@@ -153,12 +200,29 @@ def extract_fingerprints(template: dict) -> dict[str, Any]:
 
     if user_agents:
         fp["user_agents"] = sorted(user_agents)
-    if custom_headers:
-        canon = "\n".join(f"{k.lower()}:{v}" for k, v in sorted(custom_headers))
-        fp["header_signature"] = f"sha256:{_sha(canon.encode())}"
-        fp["header_names"] = sorted({k.lower() for k, _ in custom_headers})
+
+    if ordered_headers:
+        # Order-insensitive legacy signature (name-folded, sorted).
+        sorted_pairs = sorted([(k, v) for _, k, v in ordered_headers])
+        canon_sorted = "\n".join(f"{k.lower()}:{v}" for k, v in sorted_pairs)
+        fp["header_signature"] = f"sha256:{_sha(canon_sorted.encode())}"
+        fp["header_names"] = sorted({k.lower() for _, k, _ in ordered_headers})
+        # Order-preserving fields: capture the exact send order, including casing.
+        ordered_pairs = [[k, v] for _, k, v in ordered_headers]
+        fp["header_order"] = ordered_pairs
+        canon_ordered = "\n".join(f"{k}:{v}" for k, v in ordered_pairs)
+        fp["header_order_signature"] = f"sha256:{_sha(canon_ordered.encode())}"
+        fp["header_order_names"] = [k.lower() for k, _ in ordered_pairs]
+
+    if cookies:
+        fp["cookies"] = [[n, v] for n, v in cookies]
+        fp["cookie_names"] = sorted({n for n, _ in cookies})
+        canon_ck = "\n".join(f"{n}={v}" for n, v in cookies)
+        fp["cookie_signature"] = f"sha256:{_sha(canon_ck.encode())}"
+
     if bodies:
         fp["body_signatures"] = [f"sha256:{_sha(b.encode())}" for b in bodies]
+        fp["body_lengths"] = [len(b) for b in bodies]
     if raws:
         fp["raw_request_signatures"] = [f"sha256:{_sha(r.encode())}" for r in raws]
     if byte_sigs:
@@ -168,11 +232,26 @@ def extract_fingerprints(template: dict) -> dict[str, Any]:
     if methods:
         fp["http_methods"] = sorted(methods)
 
-    if methods or custom_headers or bodies or raws:
+    if oast:
+        fp["oast_injections"] = oast
+        canon_oast = "|".join(
+            f"{o['location']}:{o['placeholder']}:{o['before']}:{o['after']}"
+            for o in oast
+        )
+        fp["oast_signature"] = f"sha256:{_sha(canon_oast.encode())}"
+        fp["oast_injection_count"] = len(oast)
+        fp["oast_locations"] = sorted({o["location"] for o in oast})
+        fp["oast_placeholders"] = sorted({o["placeholder"] for o in oast})
+
+    if methods or ordered_headers or bodies or raws or cookies or oast:
         canon_parts: list[str] = list(sorted(methods))
-        canon_parts.extend(f"H:{k.lower()}:{v}" for k, v in sorted(custom_headers))
+        canon_parts.extend(f"H:{k}:{v}" for _, k, v in ordered_headers)
+        canon_parts.extend(f"C:{n}={v}" for n, v in cookies)
         canon_parts.extend(f"B:{_sha(b.encode())}" for b in bodies)
         canon_parts.extend(f"R:{_sha(r.encode())}" for r in raws)
+        canon_parts.extend(
+            f"O:{o['location']}:{o['placeholder']}" for o in oast
+        )
         fp["request_shape"] = f"sha256:{_sha('|'.join(canon_parts).encode())}"
 
     ja3 = _maybe_ja3(template)

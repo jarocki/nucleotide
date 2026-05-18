@@ -15,8 +15,94 @@ class TestFingerprint(unittest.TestCase):
         self.assertIn("user-agent", fp["header_names"])
         self.assertIn("x-foo-probe", fp["header_names"])
         self.assertTrue(fp["header_signature"].startswith("sha256:"))
+        self.assertTrue(fp["header_order_signature"].startswith("sha256:"))
         self.assertTrue(fp["request_shape"].startswith("sha256:"))
         self.assertEqual(fp["http_methods"], ["GET"])
+        # Order-preserving capture keeps the YAML declaration order.
+        self.assertEqual(
+            fp["header_order"],
+            [["User-Agent", "FooScanner/1.0"], ["X-Foo-Probe", "alpha"]],
+        )
+
+    def test_header_order_preserved_for_synthetic_doc(self):
+        doc = {
+            "id": "x",
+            "info": {"name": "x"},
+            "http": [
+                {
+                    "method": "GET",
+                    "path": ["/x"],
+                    "headers": {
+                        "User-Agent": "Probe/1",
+                        "X-Trace": "abc",
+                        "X-Then": "def",
+                    },
+                }
+            ],
+        }
+        fp = extract_fingerprints(doc)
+        self.assertEqual(
+            fp["header_order"],
+            [
+                ["User-Agent", "Probe/1"],
+                ["X-Trace", "abc"],
+                ["X-Then", "def"],
+            ],
+        )
+
+    def test_cookies_extracted_from_cookie_header(self):
+        doc = {
+            "id": "x",
+            "info": {"name": "x"},
+            "http": [
+                {
+                    "method": "GET",
+                    "path": ["/x"],
+                    "headers": {"Cookie": "sid=abc; tracker=xyz"},
+                }
+            ],
+        }
+        fp = extract_fingerprints(doc)
+        self.assertEqual(fp["cookie_names"], ["sid", "tracker"])
+        self.assertEqual(fp["cookies"], [["sid", "abc"], ["tracker", "xyz"]])
+        self.assertTrue(fp["cookie_signature"].startswith("sha256:"))
+
+    def test_cookies_extracted_from_raw_request(self):
+        doc = {
+            "id": "x",
+            "info": {"name": "x"},
+            "http": [
+                {
+                    "raw": [
+                        "GET /x HTTP/1.1\n"
+                        "Host: t\n"
+                        "Cookie: a=1; b=2\n"
+                        "\n"
+                    ]
+                }
+            ],
+        }
+        fp = extract_fingerprints(doc)
+        self.assertEqual(fp["cookie_names"], ["a", "b"])
+
+    def test_oast_injection_detected_in_body_and_header(self):
+        doc = {
+            "id": "x",
+            "info": {"name": "x"},
+            "http": [
+                {
+                    "method": "POST",
+                    "path": ["/x"],
+                    "headers": {"X-Callback": "http://{{interactsh-url}}/cb"},
+                    "body": '{"u":"http://{{interactsh-url}}/probe"}',
+                }
+            ],
+        }
+        fp = extract_fingerprints(doc)
+        self.assertGreaterEqual(fp["oast_injection_count"], 2)
+        self.assertIn("http[0].body", fp["oast_locations"])
+        self.assertIn("http[0].header:X-Callback", fp["oast_locations"])
+        self.assertEqual(fp["oast_placeholders"], ["{{interactsh-url}}"])
 
     def test_raw_template_yields_raw_signature(self):
         doc = parse_template(FIXTURES / "api-quux.yaml")

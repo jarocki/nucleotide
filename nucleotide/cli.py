@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .build import build_lookup
 from .fetch import PROJECTDISCOVERY_REPO, fetch
+from .signatures import render_snort, render_yara
 
 
 def _build(args: argparse.Namespace) -> int:
@@ -20,10 +21,18 @@ def _build(args: argparse.Namespace) -> int:
         source = args.repo
     result = build_lookup(tdir, source_url=source, min_snippet_len=args.min_len)
     args.out.write_text(json.dumps(result, indent=2, sort_keys=True))
+    if args.yara_out:
+        args.yara_out.write_text(render_yara(result.get("signatures") or {}))
+    if args.snort_out:
+        args.snort_out.write_text(render_snort(result.get("signatures") or {}))
     md = result["metadata"]
+    sigs = result.get("signatures") or {}
+    yara_n = len(sigs.get("yara") or {})
+    snort_n = sum(len(v) for v in (sigs.get("snort") or {}).values())
     print(
         f"Wrote {args.out} | templates={md['template_count']} "
-        f"snippets={md['resolved_snippets']} unresolved={md['unresolved_count']}",
+        f"snippets={md['resolved_snippets']} unresolved={md['unresolved_count']} "
+        f"yara={yara_n} snort={snort_n}",
         file=sys.stderr,
     )
     return 0
@@ -104,6 +113,18 @@ def main(argv: list[str] | None = None) -> int:
         "--no-fetch",
         action="store_true",
         help="Reuse the cache directory without pulling updates.",
+    )
+    bld.add_argument(
+        "--yara-out",
+        type=Path,
+        default=None,
+        help="Also write per-template YARA rules to this path.",
+    )
+    bld.add_argument(
+        "--snort-out",
+        type=Path,
+        default=None,
+        help="Also write per-template Snort/Suricata rules to this path.",
     )
     bld.set_defaults(func=_build)
 

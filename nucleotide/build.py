@@ -14,6 +14,7 @@ from .parse import (
     normalize_paths,
     parse_template,
 )
+from .signatures import build_signatures
 from .snippets import compute_unique_snippets
 
 
@@ -59,7 +60,7 @@ def build_lookup(
     snippet_index = {snip: tid for tid, snip in snippets.items()}
     no_url_count = sum(1 for chunks in corpus.values() if not chunks)
 
-    return {
+    result = {
         "metadata": {
             "generated_utc": datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "source": source_url,
@@ -75,6 +76,8 @@ def build_lookup(
         "snippet_index": snippet_index,
         "unresolved": unresolved,
     }
+    result["signatures"] = build_signatures(result)
+    return result
 
 
 def _split_tags(tags: Any) -> list[str]:
