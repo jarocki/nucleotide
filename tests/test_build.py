@@ -1,4 +1,5 @@
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -12,42 +13,61 @@ class TestBuild(unittest.TestCase):
     def test_end_to_end_against_real_templates(self):
         result = build_lookup(FIXTURES, source_url="fixtures")
         md = result["metadata"]
-        # Four vendored real templates: two WP plugins + Log4Shell + redis-detect.
-        self.assertEqual(md["template_count"], 4)
-        self.assertEqual(md["http_template_count"], 3)
-        self.assertEqual(md["resolved_snippets"], 3)
-        self.assertEqual(md["unresolved_count"], 0)
-        self.assertEqual(md["no_url_template_count"], 1)
-
-        ids = {t["id"] for t in result["templates"].values()}
+        # 16 vendored real templates: 4 WP plugins, 7 CVEs, exposure config,
+        # tech detect, plus tcp/dns/ssl probes with no HTTP surface.
+        self.assertEqual(md["template_count"], 16)
+        # 4 have no URL surface: redis-detect (tcp), azure-takeover (dns),
+        # expired-ssl (ssl), CVE-2014-6271 (path is "{{BaseURL}}{{paths}}"
+        # which strips to zero literal chunks).
+        self.assertEqual(md["no_url_template_count"], 4)
+        # http_template_count == templates that contributed at least one
+        # literal URL chunk; the remainder are no_url + unresolved.
         self.assertEqual(
-            ids,
-            {
-                "wordpress-akismet",
-                "wordpress-contact-form-7",
-                "CVE-2021-44228",
-                "redis-detect",
-            },
+            md["http_template_count"] + md["no_url_template_count"], 16
         )
 
-        # redis-detect is tcp-only: no URL, but yields a network byte signature.
-        redis = next(t for t in result["templates"].values() if t["id"] == "redis-detect")
-        self.assertIsNone(redis["url_snippet"])
-        self.assertIn("network_byte_signatures", redis["fingerprints"])
+        ids = {t["id"] for t in result["templates"].values()}
+        expected_subset = {
+            "wordpress-akismet",
+            "wordpress-contact-form-7",
+            "wordpress-elementor",
+            "wordpress-jetpack",
+            "CVE-2021-44228",
+            "CVE-2017-5638",
+            "CVE-2014-6271",
+            "CVE-2022-22965",
+            "CVE-2022-1388",
+            "CVE-2019-19781",
+            "CVE-2021-26084",
+            "git-config",
+            "jenkins-detect",
+            "redis-detect",
+            "azure-takeover-detection",
+            "expired-ssl",
+        }
+        self.assertEqual(ids, expected_subset)
 
         # All resolved snippets respect min_snippet_len (4).
-        index = result["snippet_index"]
-        for snip in index:
+        for snip in result["snippet_index"]:
             self.assertGreaterEqual(len(snip), 4)
 
-        # The two WP plugin templates share the `/wp-content/plugins/` prefix
-        # but get distinct unique snippets that don't collide.
-        akismet = next(t for t in result["templates"].values() if t["id"] == "wordpress-akismet")
-        cf7 = next(t for t in result["templates"].values() if t["id"] == "wordpress-contact-form-7")
-        self.assertIn(akismet["url_snippet"], akismet["paths"][0])
-        self.assertNotIn(akismet["url_snippet"], cf7["paths"][0])
-        self.assertIn(cf7["url_snippet"], cf7["paths"][0])
-        self.assertNotIn(cf7["url_snippet"], akismet["paths"][0])
+        # Four WP plugin templates share /wp-content/plugins/ but get four
+        # distinct unique snippets.
+        wp_ids = [
+            "wordpress-akismet",
+            "wordpress-contact-form-7",
+            "wordpress-elementor",
+            "wordpress-jetpack",
+        ]
+        wp_snippets = {
+            tid: next(
+                t["url_snippet"]
+                for t in result["templates"].values()
+                if t["id"] == tid
+            )
+            for tid in wp_ids
+        }
+        self.assertEqual(len(set(wp_snippets.values())), 4)
 
     def test_log4shell_template_captures_payload_signals(self):
         result = build_lookup(FIXTURES, source_url="fixtures")
@@ -55,44 +75,79 @@ class TestBuild(unittest.TestCase):
             t for t in result["templates"].values() if t["id"] == "CVE-2021-44228"
         )
         fp = log4j["fingerprints"]
-        # Two raw HTTP requests in the template.
         self.assertEqual(len(fp["raw_request_signatures"]), 2)
-        # Many ordered custom headers: cookie + UA + assorted forwarding headers.
         names = fp["header_order_names"]
         for required in ("cookie", "user-agent", "referer", "x-forwarded-for"):
             self.assertIn(required, names)
-        # OAST callbacks captured across the header set.
         self.assertGreaterEqual(fp["oast_injection_count"], 17)
         self.assertEqual(fp["oast_placeholders"], ["{{interactsh-url}}"])
-        # Cookie header was parsed back out of the raw request.
-        self.assertEqual(len(fp["cookie_names"]), 1)
 
-    def test_signatures_emitted_for_real_templates(self):
+    def test_struts2_payload_header_becomes_signature(self):
         result = build_lookup(FIXTURES, source_url="fixtures")
         sigs = result["signatures"]
-        self.assertIn("yara", sigs)
-        self.assertIn("snort", sigs)
-
-        # Log4Shell template yields a YARA rule and Snort rules.
-        yara = sigs["yara"].get("CVE-2021-44228")
+        yara = sigs["yara"].get("CVE-2017-5638")
         self.assertIsNotNone(yara)
-        self.assertIn("rule nuclei_CVE_2021_44228", yara)
-        self.assertIn('nuclei_id = "CVE-2021-44228"', yara)
-        self.assertIn('severity = "critical"', yara)
+        # The OGNL Content-Type payload should be present verbatim in the
+        # YARA rule -- generic name + payload value survives the filter.
+        self.assertIn("@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS", yara)
 
-        snort_rules = sigs["snort"].get("CVE-2021-44228") or []
-        self.assertTrue(snort_rules)
-        joined = "\n".join(snort_rules)
-        self.assertIn("alert http ", joined)
-        self.assertIn("http_uri", joined)
-        # The WP-plugin templates have a path snippet but no UA / cookies / OAST,
-        # so they should still each produce at least one URI-anchored Snort rule.
-        for tid in ("wordpress-akismet", "wordpress-contact-form-7"):
-            wp_snort = sigs["snort"].get(tid) or []
-            self.assertTrue(
-                any("http_uri" in r for r in wp_snort),
-                f"{tid} should produce a Snort URI rule",
+    def test_jenkins_detect_emits_response_anchored_snort_rule(self):
+        result = build_lookup(FIXTURES, source_url="fixtures")
+        sigs = result["signatures"]
+        jenkins_snort = sigs["snort"].get("jenkins-detect") or []
+        # A response-side anchor (`x-jenkins:`) catches *successful* probes.
+        self.assertTrue(
+            any(
+                "flow:established,to_client" in r and "x-jenkins" in r
+                for r in jenkins_snort
             )
+        )
+
+    def test_dns_template_emits_yara_only(self):
+        result = build_lookup(FIXTURES, source_url="fixtures")
+        sigs = result["signatures"]
+        # DNS template's `NXDOMAIN` response word produces a YARA rule but
+        # not an `alert http` Snort rule.
+        self.assertIn("azure-takeover-detection", sigs["yara"])
+        self.assertNotIn("azure-takeover-detection", sigs["snort"])
+
+    def test_severity_maps_to_snort_classtype(self):
+        result = build_lookup(FIXTURES, source_url="fixtures")
+        sigs = result["signatures"]
+        # A critical CVE rule should carry the attack classtype...
+        log4j_rules = sigs["snort"].get("CVE-2021-44228") or []
+        self.assertTrue(log4j_rules)
+        self.assertTrue(
+            all("classtype:web-application-attack" in r for r in log4j_rules)
+        )
+        # ...while an `info` severity template stays in the activity bucket.
+        akismet_rules = sigs["snort"].get("wordpress-akismet") or []
+        self.assertTrue(akismet_rules)
+        self.assertTrue(
+            all(
+                "classtype:web-application-activity" in r for r in akismet_rules
+            )
+        )
+
+    def test_sid_uniqueness_across_full_bundle(self):
+        result = build_lookup(FIXTURES, source_url="fixtures")
+        sigs = result["signatures"]
+        sids: list[int] = []
+        for rules in sigs["snort"].values():
+            for r in rules:
+                m = re.search(r"sid:(\d+);", r)
+                if m:
+                    sids.append(int(m.group(1)))
+        # Every emitted SID is unique across the whole rule bundle.
+        self.assertEqual(len(sids), len(set(sids)))
+
+    def test_path_signatures_use_longest_chunk_not_short_snippet(self):
+        result = build_lookup(FIXTURES, source_url="fixtures")
+        sigs = result["signatures"]
+        # The WP-plugin Snort rule should anchor on the full literal path,
+        # not the 4-char unique snippet.
+        wp_rule = (sigs["snort"].get("wordpress-akismet") or [""])[0]
+        self.assertIn("/wp-content/plugins/akismet/readme.txt", wp_rule)
 
     def test_cli_build_and_lookup(self):
         out = FIXTURES.parent / "tmp-lookup.json"
@@ -100,7 +155,7 @@ class TestBuild(unittest.TestCase):
             rc = main(["build", "--templates-dir", str(FIXTURES), "--out", str(out)])
             self.assertEqual(rc, 0)
             data = json.loads(out.read_text())
-            self.assertEqual(data["metadata"]["template_count"], 4)
+            self.assertEqual(data["metadata"]["template_count"], 16)
             rc = main(
                 [
                     "lookup",

@@ -31,23 +31,56 @@ same probe on the wire.
      name-folded sorted hash (`header_signature`).
    - **Cookies** — names + values parsed out of every `Cookie:` header
      (`cookies`, `cookie_names`, `cookie_signature`), including cookies that
-     live inside `raw:` request blocks.
+     live inside `raw:` request blocks. Values whose segments fail RFC 6265
+     cookie-name validation (Shellshock-style bash payloads in `Cookie:`)
+     fall back to an opaque single-entry list with the full value preserved.
    - **OAST callback injection points** — every occurrence of
      `{{interactsh-*}}` / `{{oast-*}}` is recorded with its location
-     (header, body, path, raw body) and the literal byte context immediately
-     before and after the marker (`oast_injections`, `oast_locations`,
-     `oast_placeholders`, `oast_signature`).
+     (header, body, path, raw URI, raw body, network input) and the literal
+     byte context immediately before and after the marker (`oast_injections`,
+     `oast_locations`, `oast_placeholders`, `oast_signature`).
+   - **Response-side matchers** — `words:` / `regex:` / `status:` / `dsl:`
+     entries pulled from every `matchers:` block across `http`, `network`,
+     `tcp`, `dns`, `ssl`, and other probe blocks
+     (`response_words`, `response_word_sites`, `response_regexes`,
+     `response_regex_sites`, `response_status_codes`, `response_dsl`).
+   - **DNS probes** — for `dns:` blocks, the queries the template issues
+     (`dns_queries`, `dns_record_types`, `dns_names`).
    - **Body / raw-request hashes**, **network byte signatures** (hex + string),
      **TLS hints**, and — only when the template fully specifies a
      ClientHello — **JA3 / JA4** hashes.
    - **`request_shape`** — single rolled-up digest over methods, ordered
      headers, cookies, body/raw hashes, and OAST injection sites.
 5. **Generate signatures** — for each template that carries enough signal,
-   nucleotide emits a YARA rule and a set of Snort/Suricata rules anchored
-   on the URL snippet, User-Agent, distinctive custom headers, cookie names,
-   and the literal context around each OAST injection point.
+   nucleotide emits:
+   - a **YARA rule** anchored on the longest literal URL chunk (not the
+     shortened lookup-only snippet), distinctive payload-bearing header
+     values (Struts2 OGNL, Log4j JNDI, Shellshock bash), cookie names, OAST
+     pre/post context bytes, response-side words from `matchers:` blocks,
+     and DNS query names;
+   - a set of **Snort/Suricata rules** with content matches on
+     `http_uri`, `http_user_agent`, `http_header`, `http_cookie`,
+     `http_client_body`, plus `flow:to_client` rules for response-side
+     anchors (so the IDS catches *successful* probes, not just attempts).
+     Severity is mapped to the Snort `classtype` (`critical`/`high` →
+     `web-application-attack`, etc.) and SIDs are de-conflicted globally
+     so a build never emits two rules with the same SID.
 6. **Lookup** — against the resulting JSON, match a URL by its unique snippet
    first (`UNIQUE`), then optionally by shared-path chunks (`AMBIGUOUS`).
+
+### Header value filtering
+
+Header anchors are chosen by *value distinctiveness*, not header name:
+- `Content-Type: application/json` is filtered out as routine.
+- `Content-Type: %{(#test='multipart/form-data')...}` (the Struts2 OGNL
+  RCE) is kept verbatim — its payload markers (`${`, `%{`, `() {`, etc.),
+  length, or non-ASCII bytes flag it as payload-bearing.
+- `Authorization: Bearer {{interactsh-url}}` is reduced to the literal
+  substring `Bearer ` and kept only if that meets the minimum anchor length.
+
+`User-Agent:` and `Cookie:` are normally handled by dedicated extractors,
+but when their *values* are payload-like (Shellshock weaponizes both) they
+also emit as raw header anchors so the bash bytes survive.
 
 ### A note on JA3 / JA4
 

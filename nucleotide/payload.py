@@ -17,6 +17,11 @@ OAST_TOKEN_RE = re.compile(
     r"\{\{\s*(interactsh-[A-Za-z0-9_-]+|interactsh|oast(?:-[A-Za-z0-9_-]+)?)\s*\}\}"
 )
 COOKIE_HEADER_RE = re.compile(r"^cookie$", re.IGNORECASE)
+# Nuclei templating placeholders (used to strip `{{Hostname}}`, `{{BaseURL}}`,
+# `{{interactsh-url}}`, etc.) when computing literal anchors from a value.
+PLACEHOLDER_RE = re.compile(r"\{\{[^}]*\}\}")
+# RFC 6265 cookie-name token grammar (per RFC 7230 token): tchar+.
+COOKIE_NAME_TOKEN_RE = re.compile(r"^[!#$%&'*+\-.0-9A-Z^_`a-z|~]+$")
 
 
 def parse_raw_request(raw: str) -> dict[str, Any]:
@@ -57,18 +62,27 @@ def parse_cookie_header(value: str) -> list[tuple[str, str]]:
     """Split a Cookie header value into [(name, value), ...].
 
     Cookies without `=` are kept as (name, "") so that bare flags survive.
+    If any segment fails RFC 6265 cookie-name validation (which catches the
+    "Shellshock in Cookie" case where the value is actually a bash payload
+    full of `;` and `=` characters), the whole header is treated as a single
+    opaque payload and returned as a single-element list with name="" and
+    the original value preserved -- callers can fingerprint the bytes
+    without inventing nonsense cookie names like `() { ignored` or `}`.
     """
-    cookies: list[tuple[str, str]] = []
-    for part in value.split(";"):
-        part = part.strip()
-        if not part:
-            continue
+    raw_parts = [p.strip() for p in value.split(";")]
+    raw_parts = [p for p in raw_parts if p]
+    parsed: list[tuple[str, str]] = []
+    for part in raw_parts:
         if "=" in part:
             n, v = part.split("=", 1)
-            cookies.append((n.strip(), v.strip()))
+            parsed.append((n.strip(), v.strip()))
         else:
-            cookies.append((part, ""))
-    return cookies
+            parsed.append((part, ""))
+    if not parsed:
+        return []
+    if all(COOKIE_NAME_TOKEN_RE.match(n) for n, _ in parsed if n):
+        return parsed
+    return [("", value.strip())]
 
 
 def find_oast_injections(
@@ -96,3 +110,21 @@ def find_oast_injections(
             }
         )
     return out
+
+
+def literal_chunks(value: str) -> list[str]:
+    """Return the literal substrings of `value` with Nuclei `{{...}}` placeholders stripped.
+
+    Empty chunks are dropped. Whitespace is preserved.
+    """
+    return [c for c in PLACEHOLDER_RE.split(value) if c]
+
+
+def longest_literal(value: str, min_len: int = 6) -> str | None:
+    """Return the longest literal substring of `value` (placeholders stripped) at least `min_len` long, else None."""
+    chunks = [c.strip() for c in literal_chunks(value)]
+    chunks = [c for c in chunks if c]
+    if not chunks:
+        return None
+    longest = max(chunks, key=len)
+    return longest if len(longest) >= min_len else None

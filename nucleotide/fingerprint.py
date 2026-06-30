@@ -13,6 +13,7 @@ import hashlib
 import re
 from typing import Any
 
+from .matchers import extract_dns_queries, extract_response_signals
 from .payload import (
     COOKIE_HEADER_RE,
     find_oast_injections,
@@ -267,5 +268,13 @@ def extract_fingerprints(template: dict) -> dict[str, Any]:
     ja4 = _maybe_ja4(template)
     if ja4:
         fp["ja4"] = ja4
+
+    fp.update(extract_response_signals(template))
+
+    dns_queries = extract_dns_queries(template)
+    if dns_queries:
+        fp["dns_queries"] = dns_queries
+        fp["dns_record_types"] = sorted({q["type"] for q in dns_queries})
+        fp["dns_names"] = [q["name"] for q in dns_queries]
 
     return fp

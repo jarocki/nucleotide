@@ -2,6 +2,8 @@ import unittest
 
 from nucleotide.payload import (
     find_oast_injections,
+    literal_chunks,
+    longest_literal,
     parse_cookie_header,
     parse_raw_request,
 )
@@ -68,6 +70,37 @@ class TestPayload(unittest.TestCase):
     def test_find_oast_injections_ignores_non_oast_placeholders(self):
         text = "{{BaseURL}}/x?{{Hostname}}"
         self.assertEqual(find_oast_injections(text, "loc"), [])
+
+    def test_parse_cookie_header_falls_back_for_shellshock_payload(self):
+        # The Shellshock cookie payload contains bash `;` separators which
+        # would shred into garbage "cookie names" like `}` or `echo` if the
+        # parser naively split on `;`. The RFC 6265 token check should
+        # detect this and fall back to a single opaque (name="", value=...).
+        payload = "() { ignored;}; echo /etc/passwd; /bin/cat /etc/passwd"
+        out = parse_cookie_header(payload)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0][0], "")
+        self.assertEqual(out[0][1], payload)
+
+    def test_parse_cookie_header_accepts_well_formed_cookies(self):
+        # Validation must still let real cookie lists through unchanged.
+        ck = parse_cookie_header("session=abc; csrf=xyz")
+        self.assertEqual(ck, [("session", "abc"), ("csrf", "xyz")])
+
+    def test_literal_chunks_splits_on_nuclei_placeholders(self):
+        self.assertEqual(
+            literal_chunks("Bearer {{interactsh-url}} /cb"),
+            ["Bearer ", " /cb"],
+        )
+        self.assertEqual(literal_chunks("{{x}}"), [])
+
+    def test_longest_literal_picks_largest_chunk_above_threshold(self):
+        self.assertEqual(
+            longest_literal("Bearer-prefix-{{x}}-tiny", min_len=6),
+            "Bearer-prefix-",
+        )
+        # Nothing meets the threshold -> None.
+        self.assertIsNone(longest_literal("/a/{{x}}/b", min_len=6))
 
 
 if __name__ == "__main__":

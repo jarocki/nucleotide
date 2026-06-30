@@ -60,9 +60,14 @@ class TestFingerprintRealTemplates(unittest.TestCase):
         self.assertGreaterEqual(len(fp["header_order"]), 17)
         self.assertTrue(fp["header_order_signature"].startswith("sha256:"))
 
-        # Cookie header survived raw-request parsing.
+        # The Cookie header was parsed: because the Log4Shell payload uses
+        # `${...}` which doesn't pass RFC 6265 cookie-name validation, the
+        # cookie parser falls back to an opaque single-entry list with the
+        # full original value preserved under name="".
         self.assertEqual(len(fp["cookie_names"]), 1)
-        self.assertIn("{{interactsh-url}}", fp["cookie_names"][0])
+        self.assertEqual(fp["cookie_names"][0], "")
+        opaque_value = fp["cookies"][0][1]
+        self.assertIn("{{interactsh-url}}", opaque_value)
 
         # Every header value carries an {{interactsh-url}} OAST callback, and
         # one shows up in the URI of the first raw request as well.
