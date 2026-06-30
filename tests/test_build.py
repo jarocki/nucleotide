@@ -9,84 +9,90 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 class TestBuild(unittest.TestCase):
-    def test_end_to_end_against_fixtures(self):
+    def test_end_to_end_against_real_templates(self):
         result = build_lookup(FIXTURES, source_url="fixtures")
         md = result["metadata"]
-        self.assertEqual(md["template_count"], 5)
-        self.assertEqual(md["http_template_count"], 4)
-        self.assertEqual(md["resolved_snippets"], 4)
+        # Four vendored real templates: two WP plugins + Log4Shell + redis-detect.
+        self.assertEqual(md["template_count"], 4)
+        self.assertEqual(md["http_template_count"], 3)
+        self.assertEqual(md["resolved_snippets"], 3)
         self.assertEqual(md["unresolved_count"], 0)
         self.assertEqual(md["no_url_template_count"], 1)
-        redis = next(t for t in result["templates"].values() if t["id"] == "redis-info-probe")
-        self.assertIsNone(redis["url_snippet"])
-        self.assertIn("network_byte_signatures", redis["fingerprints"])
 
         ids = {t["id"] for t in result["templates"].values()}
         self.assertEqual(
             ids,
             {
-                "wp-foo-plugin",
-                "wp-bar-plugin",
-                "api-quux-leak",
-                "redis-info-probe",
-                "ssrf-oast-probe",
+                "wordpress-akismet",
+                "wordpress-contact-form-7",
+                "CVE-2021-44228",
+                "redis-detect",
             },
         )
 
+        # redis-detect is tcp-only: no URL, but yields a network byte signature.
+        redis = next(t for t in result["templates"].values() if t["id"] == "redis-detect")
+        self.assertIsNone(redis["url_snippet"])
+        self.assertIn("network_byte_signatures", redis["fingerprints"])
+
+        # All resolved snippets respect min_snippet_len (4).
         index = result["snippet_index"]
         for snip in index:
             self.assertGreaterEqual(len(snip), 4)
 
-        wp_foo = next(t for t in result["templates"].values() if t["id"] == "wp-foo-plugin")
-        wp_bar = next(t for t in result["templates"].values() if t["id"] == "wp-bar-plugin")
-        self.assertIn(wp_foo["url_snippet"], wp_foo["paths"][0])
-        self.assertNotIn(wp_foo["url_snippet"], wp_bar["paths"][0])
+        # The two WP plugin templates share the `/wp-content/plugins/` prefix
+        # but get distinct unique snippets that don't collide.
+        akismet = next(t for t in result["templates"].values() if t["id"] == "wordpress-akismet")
+        cf7 = next(t for t in result["templates"].values() if t["id"] == "wordpress-contact-form-7")
+        self.assertIn(akismet["url_snippet"], akismet["paths"][0])
+        self.assertNotIn(akismet["url_snippet"], cf7["paths"][0])
+        self.assertIn(cf7["url_snippet"], cf7["paths"][0])
+        self.assertNotIn(cf7["url_snippet"], akismet["paths"][0])
 
-        quux = next(t for t in result["templates"].values() if t["id"] == "api-quux-leak")
-        self.assertIn(quux["url_snippet"], "/api/v3/quux/echo")
-        self.assertEqual(index[quux["url_snippet"]], "api-quux-leak")
-
-    def test_oast_template_captures_payload_signals(self):
+    def test_log4shell_template_captures_payload_signals(self):
         result = build_lookup(FIXTURES, source_url="fixtures")
-        ssrf = next(
-            t for t in result["templates"].values() if t["id"] == "ssrf-oast-probe"
+        log4j = next(
+            t for t in result["templates"].values() if t["id"] == "CVE-2021-44228"
         )
-        fp = ssrf["fingerprints"]
-        # Order-preserving headers and cookies are pulled from the template.
-        self.assertEqual(
-            fp["header_order"],
-            [
-                ["Content-Type", "application/json"],
-                ["User-Agent", "NucleotideProbe/1.0"],
-                ["X-Trace-Id", "abcdef-12345"],
-                ["Cookie", "sid=abc123; tracker=xyz"],
-            ],
-        )
-        self.assertEqual(fp["cookie_names"], ["sid", "tracker"])
-        # OAST callback marker landed in the request body and was captured.
-        self.assertIn("http[0].body", fp["oast_locations"])
+        fp = log4j["fingerprints"]
+        # Two raw HTTP requests in the template.
+        self.assertEqual(len(fp["raw_request_signatures"]), 2)
+        # Many ordered custom headers: cookie + UA + assorted forwarding headers.
+        names = fp["header_order_names"]
+        for required in ("cookie", "user-agent", "referer", "x-forwarded-for"):
+            self.assertIn(required, names)
+        # OAST callbacks captured across the header set.
+        self.assertGreaterEqual(fp["oast_injection_count"], 17)
         self.assertEqual(fp["oast_placeholders"], ["{{interactsh-url}}"])
-        self.assertGreaterEqual(fp["oast_injection_count"], 1)
+        # Cookie header was parsed back out of the raw request.
+        self.assertEqual(len(fp["cookie_names"]), 1)
 
-    def test_signatures_emitted_for_oast_template(self):
+    def test_signatures_emitted_for_real_templates(self):
         result = build_lookup(FIXTURES, source_url="fixtures")
         sigs = result["signatures"]
         self.assertIn("yara", sigs)
         self.assertIn("snort", sigs)
-        yara_rule = sigs["yara"].get("ssrf-oast-probe")
-        self.assertIsNotNone(yara_rule)
-        self.assertIn("rule nuclei_ssrf_oast_probe", yara_rule)
-        self.assertIn("NucleotideProbe/1.0", yara_rule)
-        self.assertIn("X-Trace-Id", yara_rule)
-        self.assertIn("sid=", yara_rule)
 
-        snort_rules = sigs["snort"].get("ssrf-oast-probe") or []
+        # Log4Shell template yields a YARA rule and Snort rules.
+        yara = sigs["yara"].get("CVE-2021-44228")
+        self.assertIsNotNone(yara)
+        self.assertIn("rule nuclei_CVE_2021_44228", yara)
+        self.assertIn('nuclei_id = "CVE-2021-44228"', yara)
+        self.assertIn('severity = "critical"', yara)
+
+        snort_rules = sigs["snort"].get("CVE-2021-44228") or []
         self.assertTrue(snort_rules)
         joined = "\n".join(snort_rules)
+        self.assertIn("alert http ", joined)
         self.assertIn("http_uri", joined)
-        self.assertIn("http_user_agent", joined)
-        self.assertIn("http_cookie", joined)
-        self.assertIn("http_client_body", joined)
+        # The WP-plugin templates have a path snippet but no UA / cookies / OAST,
+        # so they should still each produce at least one URI-anchored Snort rule.
+        for tid in ("wordpress-akismet", "wordpress-contact-form-7"):
+            wp_snort = sigs["snort"].get(tid) or []
+            self.assertTrue(
+                any("http_uri" in r for r in wp_snort),
+                f"{tid} should produce a Snort URI rule",
+            )
 
     def test_cli_build_and_lookup(self):
         out = FIXTURES.parent / "tmp-lookup.json"
@@ -94,12 +100,12 @@ class TestBuild(unittest.TestCase):
             rc = main(["build", "--templates-dir", str(FIXTURES), "--out", str(out)])
             self.assertEqual(rc, 0)
             data = json.loads(out.read_text())
-            self.assertEqual(data["metadata"]["template_count"], 5)
+            self.assertEqual(data["metadata"]["template_count"], 4)
             rc = main(
                 [
                     "lookup",
                     str(out),
-                    "https://victim.example/wp-content/plugins/foo-bar/readme.txt",
+                    "https://victim.example/wp-content/plugins/akismet/readme.txt",
                 ]
             )
             self.assertEqual(rc, 0)

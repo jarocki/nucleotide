@@ -7,24 +7,104 @@ from nucleotide.parse import parse_template
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-class TestFingerprint(unittest.TestCase):
-    def test_http_template_yields_ua_and_shape(self):
-        doc = parse_template(FIXTURES / "wp-foo.yaml")
+class TestFingerprintRealTemplates(unittest.TestCase):
+    """Assertions against the vendored real Nuclei templates in tests/fixtures/."""
+
+    def test_simple_path_template_has_no_custom_headers(self):
+        # `akismet.yaml` is a vanilla GET probe with no headers / body / cookies.
+        # All it should produce is `http_methods` and a `request_shape` digest.
+        doc = parse_template(FIXTURES / "akismet.yaml")
         fp = extract_fingerprints(doc)
-        self.assertIn("FooScanner/1.0", fp["user_agents"])
-        self.assertIn("user-agent", fp["header_names"])
-        self.assertIn("x-foo-probe", fp["header_names"])
-        self.assertTrue(fp["header_signature"].startswith("sha256:"))
-        self.assertTrue(fp["header_order_signature"].startswith("sha256:"))
-        self.assertTrue(fp["request_shape"].startswith("sha256:"))
         self.assertEqual(fp["http_methods"], ["GET"])
-        # Order-preserving capture keeps the YAML declaration order.
-        self.assertEqual(
-            fp["header_order"],
-            [["User-Agent", "FooScanner/1.0"], ["X-Foo-Probe", "alpha"]],
+        self.assertTrue(fp["request_shape"].startswith("sha256:"))
+        # None of the optional fields fire on a header/body/cookie-less template.
+        for absent in (
+            "user_agents",
+            "header_order",
+            "cookies",
+            "cookie_names",
+            "oast_injections",
+            "raw_request_signatures",
+            "body_signatures",
+            "ja3",
+            "ja4",
+        ):
+            self.assertNotIn(absent, fp, f"unexpected key {absent} on akismet")
+
+    def test_log4shell_template_captures_full_payload(self):
+        # CVE-2021-44228 is the gold-standard Log4Shell template: two raw
+        # requests, a long ordered list of custom headers, a Cookie header,
+        # and {{interactsh-url}} sprinkled into every value.
+        doc = parse_template(FIXTURES / "CVE-2021-44228.yaml")
+        fp = extract_fingerprints(doc)
+
+        # Two raw blocks → two raw-request signatures.
+        self.assertEqual(len(fp["raw_request_signatures"]), 2)
+        self.assertEqual(fp["http_methods"], ["GET"])
+
+        # Header order is preserved (and includes the Host headers we parsed
+        # back out of each raw request).
+        names = fp["header_order_names"]
+        for required in (
+            "host",
+            "user-agent",
+            "cookie",
+            "accept",
+            "accept-encoding",
+            "accept-language",
+            "x-forwarded-for",
+            "referer",
+            "origin",
+        ):
+            self.assertIn(required, names, f"missing header {required}")
+        self.assertGreaterEqual(len(fp["header_order"]), 17)
+        self.assertTrue(fp["header_order_signature"].startswith("sha256:"))
+
+        # Cookie header survived raw-request parsing.
+        self.assertEqual(len(fp["cookie_names"]), 1)
+        self.assertIn("{{interactsh-url}}", fp["cookie_names"][0])
+
+        # Every header value carries an {{interactsh-url}} OAST callback, and
+        # one shows up in the URI of the first raw request as well.
+        self.assertEqual(fp["oast_placeholders"], ["{{interactsh-url}}"])
+        self.assertGreaterEqual(fp["oast_injection_count"], 17)
+        # OAST sites span both raw requests and include a path injection.
+        self.assertTrue(
+            any(loc.startswith("http[0].raw[0]") or "raw[0].header" in loc
+                for loc in fp["oast_locations"])
+        )
+        self.assertTrue(
+            any("raw[1].header" in loc for loc in fp["oast_locations"])
         )
 
-    def test_header_order_preserved_for_synthetic_doc(self):
+    def test_tcp_only_template_yields_network_byte_signature(self):
+        doc = parse_template(FIXTURES / "redis-detect.yaml")
+        fp = extract_fingerprints(doc)
+        # The template's tcp input is a plain string (`*1\r\n$4\r\ninfo\r\n`)
+        # without a `type: hex` declaration, so we hash it as a string sig.
+        self.assertIn("network_byte_signatures", fp)
+        self.assertEqual(len(fp["network_byte_signatures"]), 1)
+        sig = fp["network_byte_signatures"][0]
+        self.assertTrue(sig.startswith("str:"))
+        # No HTTP surface → none of the HTTP-side fields fire.
+        for absent in ("header_order", "cookies", "raw_request_signatures"):
+            self.assertNotIn(absent, fp)
+
+    def test_no_ja3_without_full_tls_config(self):
+        doc = parse_template(FIXTURES / "akismet.yaml")
+        fp = extract_fingerprints(doc)
+        self.assertNotIn("ja3", fp)
+        self.assertNotIn("ja4", fp)
+
+
+class TestFingerprintSyntheticUnits(unittest.TestCase):
+    """Direct unit tests on `extract_fingerprints` with minimal Python dict
+    inputs. These exercise narrow code paths (a single header dict, a single
+    Cookie value, a single OAST marker) without standing up a full Nuclei
+    template — the input is a Python-level fixture, not a YAML template
+    pretending to be a real Nuclei rule."""
+
+    def test_header_order_preserved(self):
         doc = {
             "id": "x",
             "info": {"name": "x"},
@@ -103,27 +183,6 @@ class TestFingerprint(unittest.TestCase):
         self.assertIn("http[0].body", fp["oast_locations"])
         self.assertIn("http[0].header:X-Callback", fp["oast_locations"])
         self.assertEqual(fp["oast_placeholders"], ["{{interactsh-url}}"])
-
-    def test_raw_template_yields_raw_signature(self):
-        doc = parse_template(FIXTURES / "api-quux.yaml")
-        fp = extract_fingerprints(doc)
-        self.assertIn("raw_request_signatures", fp)
-        self.assertEqual(len(fp["raw_request_signatures"]), 1)
-
-    def test_network_template_yields_byte_signatures(self):
-        doc = parse_template(FIXTURES / "network-redis.yaml")
-        fp = extract_fingerprints(doc)
-        self.assertIn("network_byte_signatures", fp)
-        sigs = fp["network_byte_signatures"]
-        hex_sig = next(s for s in sigs if s.startswith("hex:"))
-        self.assertNotIn(" ", hex_sig)
-        self.assertEqual(hex_sig, "hex:2a310d0a24340d0a494e464f0d0a")
-
-    def test_no_ja3_without_full_tls_config(self):
-        doc = parse_template(FIXTURES / "wp-foo.yaml")
-        fp = extract_fingerprints(doc)
-        self.assertNotIn("ja3", fp)
-        self.assertNotIn("ja4", fp)
 
     def test_ja3_when_tls_config_complete(self):
         doc = {

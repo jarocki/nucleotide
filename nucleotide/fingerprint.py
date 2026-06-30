@@ -147,6 +147,13 @@ def extract_fingerprints(template: dict) -> dict[str, Any]:
                 continue
             if parsed.get("method"):
                 methods.add(str(parsed["method"]).upper())
+            target = parsed.get("target") or ""
+            if target:
+                oast.extend(
+                    find_oast_injections(
+                        target, f"http[{ri}].raw[{raw_idx}].target"
+                    )
+                )
             for hk, hv in parsed.get("headers") or []:
                 ordered_headers.append((ri, hk, hv))
                 if UA_HEADER_RE.match(hk) and hv.strip():
