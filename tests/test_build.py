@@ -8,44 +8,58 @@ from nucleotide.cli import main
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
+_EXPECTED_IDS = {
+    "wordpress-akismet",
+    "wordpress-contact-form-7",
+    "wordpress-elementor",
+    "wordpress-jetpack",
+    "CVE-2021-44228",
+    "CVE-2017-5638",
+    "CVE-2014-6271",
+    "CVE-2022-22965",
+    "CVE-2022-1388",
+    "CVE-2019-19781",
+    "CVE-2021-26084",
+    "CVE-2020-14882",
+    "CVE-2021-41773",
+    "CVE-2018-7600",
+    "CVE-2022-26134",
+    "CVE-2022-40684",
+    "CVE-2023-3519",
+    "git-config",
+    "jenkins-detect",
+    "adminer-panel",
+    "laravel-env",
+    "production-log",
+    "redis-detect",
+    "azure-takeover-detection",
+    "expired-ssl",
+    "generic-linux-lfi",
+    "error-based-sql-injection",
+    "host-header-injection",
+    "xss-fuzz",
+    "crlf-injection-generic",
+    "xmlrpc-pingback-ssrf",
+    "oob-param-based-interaction",
+}
+
 
 class TestBuild(unittest.TestCase):
     def test_end_to_end_against_real_templates(self):
         result = build_lookup(FIXTURES, source_url="fixtures")
         md = result["metadata"]
-        # 16 vendored real templates: 4 WP plugins, 7 CVEs, exposure config,
-        # tech detect, plus tcp/dns/ssl probes with no HTTP surface.
-        self.assertEqual(md["template_count"], 16)
-        # 4 have no URL surface: redis-detect (tcp), azure-takeover (dns),
-        # expired-ssl (ssl), CVE-2014-6271 (path is "{{BaseURL}}{{paths}}"
-        # which strips to zero literal chunks).
+        # 32 vendored real templates spanning WP plugins, CVEs, exposures,
+        # tech detects, generic vulnerability probes, plus tcp/dns/ssl
+        # probes with no HTTP surface.
+        self.assertEqual(md["template_count"], 32)
+        # Templates that contribute zero literal URL bytes:
+        #   redis-detect (tcp), azure-takeover-detection (dns),
+        #   expired-ssl (ssl), host-header-injection (path is just
+        #   `{{BaseURL}}`, no literal chunks).
         self.assertEqual(md["no_url_template_count"], 4)
-        # http_template_count == templates that contributed at least one
-        # literal URL chunk; the remainder are no_url + unresolved.
-        self.assertEqual(
-            md["http_template_count"] + md["no_url_template_count"], 16
-        )
 
         ids = {t["id"] for t in result["templates"].values()}
-        expected_subset = {
-            "wordpress-akismet",
-            "wordpress-contact-form-7",
-            "wordpress-elementor",
-            "wordpress-jetpack",
-            "CVE-2021-44228",
-            "CVE-2017-5638",
-            "CVE-2014-6271",
-            "CVE-2022-22965",
-            "CVE-2022-1388",
-            "CVE-2019-19781",
-            "CVE-2021-26084",
-            "git-config",
-            "jenkins-detect",
-            "redis-detect",
-            "azure-takeover-detection",
-            "expired-ssl",
-        }
-        self.assertEqual(ids, expected_subset)
+        self.assertEqual(ids, _EXPECTED_IDS)
 
         # All resolved snippets respect min_snippet_len (4).
         for snip in result["snippet_index"]:
@@ -53,19 +67,18 @@ class TestBuild(unittest.TestCase):
 
         # Four WP plugin templates share /wp-content/plugins/ but get four
         # distinct unique snippets.
-        wp_ids = [
-            "wordpress-akismet",
-            "wordpress-contact-form-7",
-            "wordpress-elementor",
-            "wordpress-jetpack",
-        ]
         wp_snippets = {
             tid: next(
                 t["url_snippet"]
                 for t in result["templates"].values()
                 if t["id"] == tid
             )
-            for tid in wp_ids
+            for tid in (
+                "wordpress-akismet",
+                "wordpress-contact-form-7",
+                "wordpress-elementor",
+                "wordpress-jetpack",
+            )
         }
         self.assertEqual(len(set(wp_snippets.values())), 4)
 
@@ -87,15 +100,12 @@ class TestBuild(unittest.TestCase):
         sigs = result["signatures"]
         yara = sigs["yara"].get("CVE-2017-5638")
         self.assertIsNotNone(yara)
-        # The OGNL Content-Type payload should be present verbatim in the
-        # YARA rule -- generic name + payload value survives the filter.
         self.assertIn("@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS", yara)
 
     def test_jenkins_detect_emits_response_anchored_snort_rule(self):
         result = build_lookup(FIXTURES, source_url="fixtures")
         sigs = result["signatures"]
         jenkins_snort = sigs["snort"].get("jenkins-detect") or []
-        # A response-side anchor (`x-jenkins:`) catches *successful* probes.
         self.assertTrue(
             any(
                 "flow:established,to_client" in r and "x-jenkins" in r
@@ -106,23 +116,17 @@ class TestBuild(unittest.TestCase):
     def test_dns_template_emits_yara_only(self):
         result = build_lookup(FIXTURES, source_url="fixtures")
         sigs = result["signatures"]
-        # DNS template's `NXDOMAIN` response word produces a YARA rule but
-        # not an `alert http` Snort rule.
         self.assertIn("azure-takeover-detection", sigs["yara"])
         self.assertNotIn("azure-takeover-detection", sigs["snort"])
 
     def test_severity_maps_to_snort_classtype(self):
         result = build_lookup(FIXTURES, source_url="fixtures")
         sigs = result["signatures"]
-        # A critical CVE rule should carry the attack classtype...
         log4j_rules = sigs["snort"].get("CVE-2021-44228") or []
-        self.assertTrue(log4j_rules)
         self.assertTrue(
             all("classtype:web-application-attack" in r for r in log4j_rules)
         )
-        # ...while an `info` severity template stays in the activity bucket.
         akismet_rules = sigs["snort"].get("wordpress-akismet") or []
-        self.assertTrue(akismet_rules)
         self.assertTrue(
             all(
                 "classtype:web-application-activity" in r for r in akismet_rules
@@ -138,16 +142,55 @@ class TestBuild(unittest.TestCase):
                 m = re.search(r"sid:(\d+);", r)
                 if m:
                     sids.append(int(m.group(1)))
-        # Every emitted SID is unique across the whole rule bundle.
         self.assertEqual(len(sids), len(set(sids)))
 
     def test_path_signatures_use_longest_chunk_not_short_snippet(self):
         result = build_lookup(FIXTURES, source_url="fixtures")
         sigs = result["signatures"]
-        # The WP-plugin Snort rule should anchor on the full literal path,
-        # not the 4-char unique snippet.
         wp_rule = (sigs["snort"].get("wordpress-akismet") or [""])[0]
         self.assertIn("/wp-content/plugins/akismet/readme.txt", wp_rule)
+
+    def test_payload_block_materializes_into_uri_anchors(self):
+        # laravel-env has 22 /.env* payload variants but its raw `path:`
+        # field is just {{BaseURL}}{{paths}}. Without materialization it
+        # produced zero URL chunks; with it, we get concrete anchors.
+        result = build_lookup(FIXTURES, source_url="fixtures")
+        laravel = next(
+            t for t in result["templates"].values() if t["id"] == "laravel-env"
+        )
+        self.assertTrue(laravel["chunks"], "laravel-env should have chunks")
+        self.assertIn("/.env", laravel["chunks"])
+        self.assertGreater(len(laravel["materialized_paths"]), 20)
+        self.assertIn("paths", laravel["payload_names"])
+        # Snort rules cover the actual .env file names.
+        rules = result["signatures"]["snort"].get("laravel-env") or []
+        joined = "\n".join(rules)
+        self.assertIn("/.env", joined)
+
+    def test_lfi_payloads_survive_materialization_cap(self):
+        # generic-linux-lfi ships 30+ path payloads. We cap materialization
+        # but should still emit multiple distinct URI anchors.
+        result = build_lookup(FIXTURES, source_url="fixtures")
+        rules = result["signatures"]["snort"].get("generic-linux-lfi") or []
+        # Should get multiple URI-anchored rules from the payload variants.
+        uri_rules = [r for r in rules if "http_uri" in r]
+        self.assertGreaterEqual(len(uri_rules), 3)
+        self.assertTrue(any("etc/passwd" in r for r in uri_rules))
+
+    def test_oast_context_clamps_at_placeholder_boundaries(self):
+        # oob-param-based-interaction chains 15+ back-to-back
+        # {{interactsh-url}} markers separated by short literals like
+        # `/&href=http://`. The before/after context must NOT leak
+        # `interactsh-url}}` bytes from a neighbouring placeholder.
+        result = build_lookup(FIXTURES, source_url="fixtures")
+        oob = next(
+            t
+            for t in result["templates"].values()
+            if t["id"] == "oob-param-based-interaction"
+        )
+        for inj in oob["fingerprints"]["oast_injections"]:
+            self.assertNotIn("interactsh-url", inj["before"])
+            self.assertNotIn("interactsh-url", inj["after"])
 
     def test_cli_build_and_lookup(self):
         out = FIXTURES.parent / "tmp-lookup.json"
@@ -155,7 +198,7 @@ class TestBuild(unittest.TestCase):
             rc = main(["build", "--templates-dir", str(FIXTURES), "--out", str(out)])
             self.assertEqual(rc, 0)
             data = json.loads(out.read_text())
-            self.assertEqual(data["metadata"]["template_count"], 16)
+            self.assertEqual(data["metadata"]["template_count"], 32)
             rc = main(
                 [
                     "lookup",

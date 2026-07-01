@@ -10,7 +10,9 @@ from typing import Any
 from .fingerprint import extract_fingerprints
 from .parse import (
     extract_literal_chunks,
+    extract_payloads,
     iter_template_files,
+    materialize_paths,
     normalize_paths,
     parse_template,
 )
@@ -37,8 +39,14 @@ def build_lookup(
         tid = base_id if base_id not in templates else f"{base_id}@{rel}"
         info = doc.get("info") or {}
         paths = normalize_paths(doc)
+        # Expand `path: [{{BaseURL}}{{X}}]` + `payloads: {X: [...]}` into
+        # concrete detection paths, then chunk. Templates whose real URL
+        # surface lives in `payloads:` (laravel-env, generic-linux-lfi,
+        # xss-fuzz, etc.) would otherwise emit no URI signature at all.
+        payloads = extract_payloads(doc)
+        materialized = materialize_paths(paths, payloads)
         chunks: list[str] = []
-        for p in paths:
+        for p in materialized:
             chunks.extend(extract_literal_chunks(p))
         templates[tid] = {
             "id": base_id,
@@ -47,6 +55,8 @@ def build_lookup(
             "tags": _split_tags(info.get("tags")),
             "file": rel,
             "paths": paths,
+            "materialized_paths": materialized if payloads else [],
+            "payload_names": sorted(payloads),
             "chunks": sorted({c for c in chunks if len(c) >= min_snippet_len}),
             "fingerprints": extract_fingerprints(doc),
         }

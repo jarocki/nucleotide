@@ -218,28 +218,47 @@ def _http_response_words(fp: dict[str, Any]) -> list[str]:
     return out
 
 
-def _uri_anchors(t: dict[str, Any], *, min_len: int = _DEFAULT_URI_MIN) -> list[str]:
-    """Pick distinctive URI-side anchor strings for this template.
+_DEFAULT_URI_ANCHOR_CAP = 6
 
-    Prefers the longest literal chunk from `template["chunks"]` (e.g. the full
+
+def _uri_anchors(
+    t: dict[str, Any],
+    *,
+    min_len: int = _DEFAULT_URI_MIN,
+    cap: int = _DEFAULT_URI_ANCHOR_CAP,
+) -> list[str]:
+    """Pick up to `cap` distinctive URI-side anchor strings for this template.
+
+    Prefers the longest literal chunks from `template["chunks"]` (e.g. the full
     `/wp-content/plugins/akismet/readme.txt` literal) over the shorter
     `url_snippet` which the lookup table uses for fast uniqueness queries.
     Falls back to the snippet when no chunk is long enough.
+
+    Templates with a broad payload list (`generic-linux-lfi`,
+    `laravel-env`, `xss-fuzz`) can materialize to many concrete path
+    variants; the cap controls how many of those emit as separate rules.
+    Chunks that are pure substrings of an already-selected longer chunk
+    are dropped -- keeping `/etc/passwd` when we already have
+    `/../../../etc/passwd` is redundant.
     """
-    chunks = t.get("chunks") or []
-    anchors: list[str] = []
     seen: set[str] = set()
-    for c in sorted((c for c in chunks if isinstance(c, str)), key=len, reverse=True):
-        if len(c) < min_len:
+    candidates: list[str] = []
+    for c in sorted(
+        (c for c in (t.get("chunks") or []) if isinstance(c, str)),
+        key=len,
+        reverse=True,
+    ):
+        if len(c) < min_len or c in seen:
             continue
-        if c in seen:
+        # Drop substrings of already-kept anchors.
+        if any(c in existing for existing in candidates):
             continue
         seen.add(c)
-        anchors.append(c)
-        if len(anchors) >= 2:
+        candidates.append(c)
+        if len(candidates) >= cap:
             break
-    if anchors:
-        return anchors
+    if candidates:
+        return candidates
     snip = t.get("url_snippet")
     if isinstance(snip, str) and snip:
         return [snip]

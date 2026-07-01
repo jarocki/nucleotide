@@ -22,7 +22,11 @@ same probe on the wire.
 3. **Compute the shortest unique substring** for each template across the
    whole corpus. Templates that share all substrings with another template
    end up in `unresolved`; templates with no HTTP path (network-only,
-   DNS-only) are reported as `no_url`.
+   DNS-only) are reported as `no_url`. Templates whose paths look like
+   `{{BaseURL}}{{X}}` and define `X` under a `payloads:` block (`/.env`,
+   `/.env.bak`, `/etc/passwd`, URL-encoded XSS variants, etc.) are
+   **materialized** first — each payload value is substituted into the
+   placeholder so the real detection surface enters the chunk set.
 4. **Extract fingerprints** per template from the *full payload*, not just
    the URL:
    - **User-Agents** — every explicit UA value.
@@ -38,7 +42,11 @@ same probe on the wire.
      `{{interactsh-*}}` / `{{oast-*}}` is recorded with its location
      (header, body, path, raw URI, raw body, network input) and the literal
      byte context immediately before and after the marker (`oast_injections`,
-     `oast_locations`, `oast_placeholders`, `oast_signature`).
+     `oast_locations`, `oast_placeholders`, `oast_signature`). The
+     before/after slice is clamped to the surrounding literal chunk so
+     back-to-back placeholders (`{{X}}sep{{X}}sep{{X}}...`, common in
+     parameter-fuzzing templates) don't bleed a neighbouring placeholder's
+     bytes into the anchor.
    - **Response-side matchers** — `words:` / `regex:` / `status:` / `dsl:`
      entries pulled from every `matchers:` block across `http`, `network`,
      `tcp`, `dns`, `ssl`, and other probe blocks

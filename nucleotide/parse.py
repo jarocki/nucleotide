@@ -73,3 +73,84 @@ def normalize_paths(template: dict) -> list[str]:
 def extract_literal_chunks(path: str) -> list[str]:
     """Strip Nuclei placeholder expressions and return the literal substrings."""
     return [c for c in PLACEHOLDER_RE.split(path) if c]
+
+
+# Cap the number of materialized paths per template so a template with a
+# huge payload list doesn't blow up the chunk set. Templates like
+# generic-linux-lfi ship 30+ path variants, xss-fuzz ships 29+ ~500-char
+# XSS payloads -- we take the first N unique values.
+_MAX_PAYLOAD_MATERIALIZATION = 40
+
+
+def extract_payloads(template: dict) -> dict[str, list[str]]:
+    """Return `{payload_name: [values...]}` for every http/requests block.
+
+    Payload values that reference an external helper file (given as a string
+    path instead of an inline list) are skipped -- we only have the YAML in
+    hand, not the referenced helpers directory. Non-string list entries are
+    coerced to `str()`.
+    """
+    result: dict[str, list[str]] = {}
+    for key in ("http", "requests"):
+        block = template.get(key)
+        if not isinstance(block, list):
+            continue
+        for req in block:
+            if not isinstance(req, dict):
+                continue
+            p = req.get("payloads")
+            if not isinstance(p, dict):
+                continue
+            for name, vals in p.items():
+                if not isinstance(name, str):
+                    continue
+                if not isinstance(vals, list):
+                    # References like `payloads: {paths: helpers/foo.txt}`
+                    # can't be materialized without the helper file.
+                    continue
+                strings = [
+                    str(v) for v in vals if isinstance(v, (str, int, float))
+                ]
+                if strings:
+                    result.setdefault(name, []).extend(strings)
+    return result
+
+
+def materialize_paths(
+    paths: list[str],
+    payloads: dict[str, list[str]],
+    *,
+    cap: int = _MAX_PAYLOAD_MATERIALIZATION,
+) -> list[str]:
+    """Expand `{{X}}` placeholders using known payload values.
+
+    Runs one substitution round per payload variable (not a full cartesian
+    product) to bound output size. The output list contains both the
+    original paths and every materialization; duplicates are dropped.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in paths:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    for name, values in payloads.items():
+        token = "{{" + name + "}}"
+        pending: list[str] = []
+        for existing in out:
+            if token not in existing:
+                continue
+            for v in values:
+                materialized = existing.replace(token, v)
+                if materialized in seen:
+                    continue
+                seen.add(materialized)
+                pending.append(materialized)
+                if len(seen) >= cap + len(paths):
+                    break
+            if len(seen) >= cap + len(paths):
+                break
+        out.extend(pending)
+        if len(seen) >= cap + len(paths):
+            break
+    return out

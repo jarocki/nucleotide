@@ -3,7 +3,9 @@ from pathlib import Path
 
 from nucleotide.parse import (
     extract_literal_chunks,
+    extract_payloads,
     iter_template_files,
+    materialize_paths,
     normalize_paths,
     parse_template,
 )
@@ -45,6 +47,46 @@ class TestParse(unittest.TestCase):
         self.assertEqual(chunks, ["/wp-content/plugins/akismet/readme.txt"])
         chunks = extract_literal_chunks("/a/{{x}}/b/{{y}}")
         self.assertEqual(chunks, ["/a/", "/b/"])
+
+    def test_extract_payloads_reads_inline_lists(self):
+        doc = parse_template(FIXTURES / "laravel-env.yaml")
+        payloads = extract_payloads(doc)
+        self.assertIn("paths", payloads)
+        self.assertIn("/.env", payloads["paths"])
+        self.assertIn("/.env.production", payloads["paths"])
+
+    def test_extract_payloads_skips_external_file_references(self):
+        # Nuclei allows `payloads: {X: helpers/foo.txt}`. Without the helper
+        # file we can't materialize; the extractor must not crash and must
+        # return an empty result for such payloads.
+        doc = {
+            "id": "x",
+            "info": {"name": "x"},
+            "http": [
+                {
+                    "path": ["/x"],
+                    "payloads": {"external": "helpers/tokens.txt"},
+                }
+            ],
+        }
+        self.assertEqual(extract_payloads(doc), {})
+
+    def test_materialize_paths_substitutes_placeholder(self):
+        paths = ["{{BaseURL}}{{P}}"]
+        payloads = {"P": ["/.env", "/.env.bak"]}
+        out = materialize_paths(paths, payloads)
+        self.assertIn("{{BaseURL}}/.env", out)
+        self.assertIn("{{BaseURL}}/.env.bak", out)
+        # Original path is preserved too.
+        self.assertIn("{{BaseURL}}{{P}}", out)
+
+    def test_materialize_paths_bounds_expansion(self):
+        # A cap prevents runaway materialization when a payload list is huge.
+        paths = ["{{BaseURL}}{{P}}"]
+        payloads = {"P": [f"/x{i}" for i in range(200)]}
+        out = materialize_paths(paths, payloads, cap=5)
+        # +1 for the original, +cap materialized entries at most.
+        self.assertLessEqual(len(out), 6)
 
 
 if __name__ == "__main__":

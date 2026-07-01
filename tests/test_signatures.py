@@ -269,6 +269,26 @@ class TestNewBehaviors(unittest.TestCase):
         self.assertTrue(rules)
         self.assertIn("Content-Type: %{", rules[0])
 
+    def test_uri_anchors_drop_substrings_of_longer_selections(self):
+        # /etc/passwd is a substring of /../../etc/passwd; the shorter
+        # variant should be dropped once the longer one is picked.
+        from nucleotide.signatures import _uri_anchors
+
+        t = {
+            "chunks": ["/../../etc/passwd", "/etc/passwd", "/entirely-other"],
+        }
+        anchors = _uri_anchors(t)
+        self.assertIn("/../../etc/passwd", anchors)
+        self.assertNotIn("/etc/passwd", anchors)
+        self.assertIn("/entirely-other", anchors)
+
+    def test_uri_anchor_cap_bounds_emitted_rules(self):
+        from nucleotide.signatures import _uri_anchors
+
+        t = {"chunks": [f"/distinct-anchor-{i:02d}-tail" for i in range(20)]}
+        anchors = _uri_anchors(t, cap=4)
+        self.assertEqual(len(anchors), 4)
+
     def test_shellshock_cookie_header_still_emits_via_payload_fallback(self):
         # Cookie is normally "dedicated" to the cookie= extractor, but when
         # its value is payload-like (Shellshock!) it should also emit as a

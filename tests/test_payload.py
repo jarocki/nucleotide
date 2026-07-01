@@ -67,6 +67,23 @@ class TestPayload(unittest.TestCase):
             {"{{interactsh-url}}", "{{interactsh-md5}}", "{{oast-id}}"},
         )
 
+    def test_find_oast_injections_clamps_context_at_neighbouring_placeholder(self):
+        # Back-to-back OAST markers (as in oob-param-based-interaction).
+        # The before/after context must NOT bleed the neighbouring
+        # placeholder's own text into the anchor.
+        text = "/?u=http://{{interactsh-url}}/&href=http://{{interactsh-url}}/&x"
+        out = find_oast_injections(text, "loc")
+        self.assertEqual(len(out), 2)
+        for inj in out:
+            self.assertNotIn("{{", inj["before"])
+            self.assertNotIn("}}", inj["before"])
+            self.assertNotIn("{{", inj["after"])
+            self.assertNotIn("}}", inj["after"])
+            # Sanity: the context still contains the actual literal bytes.
+            self.assertTrue(
+                "http://" in inj["before"] or "http://" in inj["after"]
+            )
+
     def test_find_oast_injections_ignores_non_oast_placeholders(self):
         text = "{{BaseURL}}/x?{{Hostname}}"
         self.assertEqual(find_oast_injections(text, "loc"), [])

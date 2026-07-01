@@ -94,19 +94,28 @@ def find_oast_injections(
     """Locate OAST callback placeholders in `text` with `context` bytes of surrounding literal.
 
     Returns a list of dicts with `location`, `placeholder`, `before`, `after`.
-    The before/after slices are the immediate literal context (other template
-    placeholders are *not* stripped) -- they're meant to be used as anchor
-    strings for IDS signatures.
+    The before/after slices are the immediate *literal* context: they're
+    clamped to the boundary of the surrounding literal chunk so that
+    back-to-back placeholders (`{{X}}sep{{X}}sep{{X}}...`, common in
+    parameter-fuzzing templates) don't bleed the neighbouring placeholder's
+    text into the anchor. Anchors like `ctsh-url}}/&href=http://` are what
+    that used to produce -- worse than useless for IDS matching.
     """
     out: list[dict[str, str]] = []
     for m in OAST_TOKEN_RE.finditer(text):
         s, e = m.span()
+        # Left boundary: end of the previous `}}`, or start of text.
+        prev_close = text.rfind("}}", 0, s)
+        left_boundary = 0 if prev_close == -1 else prev_close + 2
+        # Right boundary: start of the next `{{`, or end of text.
+        next_open = text.find("{{", e)
+        right_boundary = len(text) if next_open == -1 else next_open
         out.append(
             {
                 "location": location,
                 "placeholder": m.group(0),
-                "before": text[max(0, s - context) : s],
-                "after": text[e : e + context],
+                "before": text[max(left_boundary, s - context) : s],
+                "after": text[e : min(right_boundary, e + context)],
             }
         )
     return out
