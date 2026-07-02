@@ -332,8 +332,26 @@ def yara_rule_for(tid: str, t: dict[str, Any]) -> str | None:
     return "\n".join(lines) + "\n"
 
 
+# Observability tiers. Every emitted Snort rule is tagged with the tier that
+# a consumer of that data source could actually match. See docs/tiers.md
+# (and the README's "Signature tiers" section) for the deployment-vantage
+# framing.
+#
+#   T1  URL-log only              -- access logs, CDN logs, DNS logs, TCP flow only
+#   T2  Header-visible            -- WAF, SSL-intercepting proxy, mod_security
+#   T3  Body/cleartext PCAP       -- decrypted or plaintext PCAP with request body
+#   T4  TLS-opaque PCAP           -- network sensor with no SSL keys (JA3/JA4)
+#   T5  Response-only             -- outbound proxy log, honeypot response cache
+TIER_URL = "T1"
+TIER_HEADER = "T2"
+TIER_BODY = "T3"
+TIER_TLS = "T4"
+TIER_RESPONSE = "T5"
+TIERS = (TIER_URL, TIER_HEADER, TIER_BODY, TIER_TLS, TIER_RESPONSE)
+
+
 def _emit_snort(
-    rules: list[str],
+    rules: list[dict[str, str]],
     *,
     tid: str,
     salt: int,
@@ -342,11 +360,12 @@ def _emit_snort(
     buffer: str | None,
     flow: str,
     suffix: str,
+    tier: str,
     nocase: bool = False,
 ) -> int:
-    """Append one Snort rule and return the next salt."""
+    """Append one Snort rule (tagged with its observability tier) and return the next salt."""
     sid = _stable_sid(tid, salt)
-    msg = f"Nuclei {tid} ({suffix})".replace('"', "'")
+    msg = f"[{tier}] Nuclei {tid} ({suffix})".replace('"', "'")
     opts = [
         f'msg:"{msg}"',
         f"flow:{flow}",
@@ -359,20 +378,40 @@ def _emit_snort(
     opts.append(f"sid:{sid}")
     opts.append("rev:1")
     opts.append(f"classtype:{classtype}")
-    rules.append("alert http any any -> any any (" + "; ".join(opts) + ";)")
+    opts.append(f'metadata:tier {tier}')
+    rules.append(
+        {
+            "tier": tier,
+            "rule": "alert http any any -> any any ("
+            + "; ".join(opts)
+            + ";)",
+        }
+    )
     return salt + 1
 
 
-def snort_rules_for(tid: str, t: dict[str, Any]) -> list[str]:
-    """Emit a list of Snort 3 / Suricata rules for one template.
+def _oast_tier(location: str) -> str:
+    """Classify an OAST injection by where in the request it lives."""
+    if "body" in location or "network" in location:
+        return TIER_BODY
+    if "header:" in location:
+        return TIER_HEADER
+    # target / path / anything else URL-shaped
+    return TIER_URL
+
+
+def snort_rules_for(tid: str, t: dict[str, Any]) -> list[dict[str, str]]:
+    """Emit a list of `{tier, rule}` dicts for one template.
 
     Rules use classic Snort 2 syntax (`content:"..."; http_uri;`) which both
-    Snort 3 and Suricata understand. SIDs are deterministic per (tid, salt);
-    `build_signatures` resolves global collisions afterwards.
+    Snort 3 and Suricata understand. Every rule is tagged with its
+    observability tier so downstream code can split the bundle by what
+    each vantage point can actually see. SIDs are deterministic per
+    (tid, salt); `build_signatures` resolves global collisions afterwards.
     """
     fp = t.get("fingerprints") or {}
     classtype = _classtype_for(t.get("severity"))
-    rules: list[str] = []
+    rules: list[dict[str, str]] = []
     salt = 0
 
     for anchor in _uri_anchors(t):
@@ -385,6 +424,7 @@ def snort_rules_for(tid: str, t: dict[str, Any]) -> list[str]:
             buffer="http_uri",
             flow="established,to_server",
             suffix=f"URI {anchor[:32]}",
+            tier=TIER_URL,
             nocase=True,
         )
 
@@ -399,6 +439,7 @@ def snort_rules_for(tid: str, t: dict[str, Any]) -> list[str]:
                 buffer="http_user_agent",
                 flow="established,to_server",
                 suffix="User-Agent",
+                tier=TIER_HEADER,
             )
 
     for k, v in _interesting_headers(fp.get("header_order")):
@@ -411,6 +452,7 @@ def snort_rules_for(tid: str, t: dict[str, Any]) -> list[str]:
             buffer="http_header",
             flow="established,to_server",
             suffix=f"header {k}",
+            tier=TIER_HEADER,
         )
 
     for ck in fp.get("cookie_names") or []:
@@ -424,6 +466,7 @@ def snort_rules_for(tid: str, t: dict[str, Any]) -> list[str]:
                 buffer="http_cookie",
                 flow="established,to_server",
                 suffix=f"cookie {ck}",
+                tier=TIER_HEADER,
             )
 
     for o in fp.get("oast_injections") or []:
@@ -432,7 +475,10 @@ def snort_rules_for(tid: str, t: dict[str, Any]) -> list[str]:
         before = (o.get("before") or "").rstrip()
         after = (o.get("after") or "").lstrip()
         loc = o.get("location") or ""
-        buffer = "http_client_body" if "body" in loc else None
+        oast_tier = _oast_tier(loc)
+        buffer = "http_client_body" if oast_tier == TIER_BODY else (
+            "http_uri" if oast_tier == TIER_URL else "http_header"
+        )
         if len(before) >= 6 and "{{" not in before:
             salt = _emit_snort(
                 rules,
@@ -443,6 +489,7 @@ def snort_rules_for(tid: str, t: dict[str, Any]) -> list[str]:
                 buffer=buffer,
                 flow="established,to_server",
                 suffix=f"OAST pre @ {loc}",
+                tier=oast_tier,
             )
         if len(after) >= 6 and "{{" not in after:
             salt = _emit_snort(
@@ -454,11 +501,12 @@ def snort_rules_for(tid: str, t: dict[str, Any]) -> list[str]:
                 buffer=buffer,
                 flow="established,to_server",
                 suffix=f"OAST post @ {loc}",
+                tier=oast_tier,
             )
 
-    # Response-side anchors (caught coming back from the server). Only emit
-    # for response words pulled from HTTP/TCP/network probes -- DNS/SSL
-    # words like "NXDOMAIN" don't translate to an `alert http` rule.
+    # Response-side anchors -- Tier 5. Only emit for response words pulled
+    # from HTTP/TCP/network probes; DNS/SSL words like "NXDOMAIN" don't
+    # translate to an `alert http` rule.
     for w in _http_response_words(fp):
         if isinstance(w, str) and len(w) >= _DEFAULT_RESPONSE_WORD_MIN:
             salt = _emit_snort(
@@ -469,13 +517,43 @@ def snort_rules_for(tid: str, t: dict[str, Any]) -> list[str]:
                 content=_snort_escape(w),
                 buffer=None,
                 flow="established,to_client",
-                suffix=f"response word",
+                suffix="response word",
+                tier=TIER_RESPONSE,
             )
+
+    # TLS-opaque tier: JA3/JA4 fingerprints if the template specifies a
+    # ClientHello. Emit as Suricata's `tls.ja3.hash` / `ja4.hash` rules.
+    ja3 = fp.get("ja3")
+    if isinstance(ja3, str) and ja3:
+        sid = _stable_sid(tid, salt)
+        salt += 1
+        msg = f"[{TIER_TLS}] Nuclei {tid} (JA3)".replace('"', "'")
+        rule = (
+            f'alert tls any any -> any any '
+            f'(msg:"{msg}"; ja3.hash; content:"{ja3}"; '
+            f'sid:{sid}; rev:1; classtype:{classtype}; '
+            f'metadata:tier {TIER_TLS};)'
+        )
+        rules.append({"tier": TIER_TLS, "rule": rule})
+    ja4 = fp.get("ja4")
+    if isinstance(ja4, str) and ja4:
+        sid = _stable_sid(tid, salt)
+        salt += 1
+        msg = f"[{TIER_TLS}] Nuclei {tid} (JA4)".replace('"', "'")
+        rule = (
+            f'alert tls any any -> any any '
+            f'(msg:"{msg}"; ja4.hash; content:"{ja4}"; '
+            f'sid:{sid}; rev:1; classtype:{classtype}; '
+            f'metadata:tier {TIER_TLS};)'
+        )
+        rules.append({"tier": TIER_TLS, "rule": rule})
 
     return rules
 
 
-def _deconflict_sids(snort_rules: dict[str, list[str]]) -> dict[str, list[str]]:
+def _deconflict_sids(
+    snort_rules: dict[str, list[dict[str, str]]],
+) -> dict[str, list[dict[str, str]]]:
     """Walk the global rule set and re-roll any SID that collides with one already used.
 
     Two templates' rules can hash to the same SID; this loop salts again
@@ -484,13 +562,14 @@ def _deconflict_sids(snort_rules: dict[str, list[str]]) -> dict[str, list[str]]:
     """
     sid_re = re.compile(r"sid:(\d+);")
     seen: set[int] = set()
-    out: dict[str, list[str]] = {}
+    out: dict[str, list[dict[str, str]]] = {}
     for tid in sorted(snort_rules):
-        rebuilt: list[str] = []
-        for idx, rule in enumerate(snort_rules[tid]):
+        rebuilt: list[dict[str, str]] = []
+        for idx, entry in enumerate(snort_rules[tid]):
+            rule = entry["rule"]
             m = sid_re.search(rule)
             if not m:
-                rebuilt.append(rule)
+                rebuilt.append(entry)
                 continue
             sid = int(m.group(1))
             salt = idx
@@ -498,15 +577,22 @@ def _deconflict_sids(snort_rules: dict[str, list[str]]) -> dict[str, list[str]]:
                 salt += 1000
                 sid = _stable_sid(tid, salt)
             seen.add(sid)
-            rebuilt.append(sid_re.sub(f"sid:{sid};", rule, count=1))
+            rebuilt.append(
+                {
+                    "tier": entry["tier"],
+                    "rule": sid_re.sub(f"sid:{sid};", rule, count=1),
+                }
+            )
         out[tid] = rebuilt
     return out
 
 
 def build_signatures(lookup: dict[str, Any]) -> dict[str, Any]:
-    """Compute YARA + Snort rule sets for every template in a built lookup."""
+    """Compute YARA + Snort + Sigma rule sets for every template in a built lookup."""
+    from .sigma import build_sigma
+
     yara_rules: dict[str, str] = {}
-    snort_rules: dict[str, list[str]] = {}
+    snort_rules: dict[str, list[dict[str, str]]] = {}
     for tid, t in (lookup.get("templates") or {}).items():
         y = yara_rule_for(tid, t)
         if y:
@@ -515,7 +601,8 @@ def build_signatures(lookup: dict[str, Any]) -> dict[str, Any]:
         if s:
             snort_rules[tid] = s
     snort_rules = _deconflict_sids(snort_rules)
-    return {"yara": yara_rules, "snort": snort_rules}
+    sigma_rules = build_sigma(lookup)
+    return {"yara": yara_rules, "snort": snort_rules, "sigma": sigma_rules}
 
 
 def render_yara(signatures: dict[str, Any]) -> str:
@@ -524,10 +611,26 @@ def render_yara(signatures: dict[str, Any]) -> str:
     return "\n".join(rules[tid] for tid in sorted(rules))
 
 
-def render_snort(signatures: dict[str, Any]) -> str:
-    """Flatten every Snort rule in the bundle into a newline-terminated string."""
+def render_snort(
+    signatures: dict[str, Any],
+    *,
+    tier: str | None = None,
+) -> str:
+    """Flatten every Snort rule in the bundle into a newline-terminated string.
+
+    Passing `tier=` returns only the rules for that observability tier
+    (`"T1"`..`"T5"`); default returns all tiers.
+    """
     rules = (signatures or {}).get("snort") or {}
     out: list[str] = []
     for tid in sorted(rules):
-        out.extend(rules[tid])
+        for entry in rules[tid]:
+            if tier is not None and entry.get("tier") != tier:
+                continue
+            out.append(entry["rule"])
     return "\n".join(out) + ("\n" if out else "")
+
+
+def render_snort_by_tier(signatures: dict[str, Any]) -> dict[str, str]:
+    """Return `{tier: rendered_rules_text}` for every tier that has rules."""
+    return {t: render_snort(signatures, tier=t) for t in TIERS}

@@ -9,7 +9,8 @@ from pathlib import Path
 
 from .build import build_lookup
 from .fetch import PROJECTDISCOVERY_REPO, fetch
-from .signatures import render_snort, render_yara
+from .sigma import render_sigma, render_sigma_by_tier
+from .signatures import TIERS, render_snort, render_snort_by_tier, render_yara
 
 
 def _build(args: argparse.Namespace) -> int:
@@ -25,14 +26,35 @@ def _build(args: argparse.Namespace) -> int:
         args.yara_out.write_text(render_yara(result.get("signatures") or {}))
     if args.snort_out:
         args.snort_out.write_text(render_snort(result.get("signatures") or {}))
+    if args.snort_out_dir:
+        args.snort_out_dir.mkdir(parents=True, exist_ok=True)
+        per_tier = render_snort_by_tier(result.get("signatures") or {})
+        for tier, text in per_tier.items():
+            if text.strip():
+                (args.snort_out_dir / f"nuclei-{tier.lower()}.rules").write_text(text)
+    if args.sigma_out:
+        args.sigma_out.write_text(render_sigma(result.get("signatures") or {}))
+    if args.sigma_out_dir:
+        args.sigma_out_dir.mkdir(parents=True, exist_ok=True)
+        for tier, text in render_sigma_by_tier(result.get("signatures") or {}).items():
+            if text.strip():
+                (args.sigma_out_dir / f"nuclei-{tier.lower()}.yml").write_text(text)
     md = result["metadata"]
     sigs = result.get("signatures") or {}
     yara_n = len(sigs.get("yara") or {})
-    snort_n = sum(len(v) for v in (sigs.get("snort") or {}).values())
+    snort_by_tier: dict[str, int] = {t: 0 for t in TIERS}
+    for entries in (sigs.get("snort") or {}).values():
+        for entry in entries:
+            tier = entry.get("tier")
+            if tier in snort_by_tier:
+                snort_by_tier[tier] += 1
+    snort_summary = " ".join(
+        f"{t}={snort_by_tier[t]}" for t in TIERS if snort_by_tier[t]
+    )
     print(
         f"Wrote {args.out} | templates={md['template_count']} "
         f"snippets={md['resolved_snippets']} unresolved={md['unresolved_count']} "
-        f"yara={yara_n} snort={snort_n}",
+        f"yara={yara_n} snort[{snort_summary}]",
         file=sys.stderr,
     )
     return 0
@@ -124,7 +146,25 @@ def main(argv: list[str] | None = None) -> int:
         "--snort-out",
         type=Path,
         default=None,
-        help="Also write per-template Snort/Suricata rules to this path.",
+        help="Also write per-template Snort/Suricata rules (all tiers) to this path.",
+    )
+    bld.add_argument(
+        "--snort-out-dir",
+        type=Path,
+        default=None,
+        help="Also write per-tier Snort/Suricata rules (nuclei-t1.rules ... nuclei-t5.rules) to this directory.",
+    )
+    bld.add_argument(
+        "--sigma-out",
+        type=Path,
+        default=None,
+        help="Also write a combined Sigma rule collection (T1 + T5) to this path.",
+    )
+    bld.add_argument(
+        "--sigma-out-dir",
+        type=Path,
+        default=None,
+        help="Also write per-tier Sigma rule collections (nuclei-t1.yml, nuclei-t5.yml) to this directory.",
     )
     bld.set_defaults(func=_build)
 

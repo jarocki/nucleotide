@@ -108,8 +108,10 @@ class TestBuild(unittest.TestCase):
         jenkins_snort = sigs["snort"].get("jenkins-detect") or []
         self.assertTrue(
             any(
-                "flow:established,to_client" in r and "x-jenkins" in r
-                for r in jenkins_snort
+                "flow:established,to_client" in e["rule"]
+                and "x-jenkins" in e["rule"]
+                and e["tier"] == "T5"
+                for e in jenkins_snort
             )
         )
 
@@ -124,12 +126,13 @@ class TestBuild(unittest.TestCase):
         sigs = result["signatures"]
         log4j_rules = sigs["snort"].get("CVE-2021-44228") or []
         self.assertTrue(
-            all("classtype:web-application-attack" in r for r in log4j_rules)
+            all("classtype:web-application-attack" in e["rule"] for e in log4j_rules)
         )
         akismet_rules = sigs["snort"].get("wordpress-akismet") or []
         self.assertTrue(
             all(
-                "classtype:web-application-activity" in r for r in akismet_rules
+                "classtype:web-application-activity" in e["rule"]
+                for e in akismet_rules
             )
         )
 
@@ -137,9 +140,9 @@ class TestBuild(unittest.TestCase):
         result = build_lookup(FIXTURES, source_url="fixtures")
         sigs = result["signatures"]
         sids: list[int] = []
-        for rules in sigs["snort"].values():
-            for r in rules:
-                m = re.search(r"sid:(\d+);", r)
+        for entries in sigs["snort"].values():
+            for e in entries:
+                m = re.search(r"sid:(\d+);", e["rule"])
                 if m:
                     sids.append(int(m.group(1)))
         self.assertEqual(len(sids), len(set(sids)))
@@ -147,8 +150,12 @@ class TestBuild(unittest.TestCase):
     def test_path_signatures_use_longest_chunk_not_short_snippet(self):
         result = build_lookup(FIXTURES, source_url="fixtures")
         sigs = result["signatures"]
-        wp_rule = (sigs["snort"].get("wordpress-akismet") or [""])[0]
-        self.assertIn("/wp-content/plugins/akismet/readme.txt", wp_rule)
+        wp_entries = sigs["snort"].get("wordpress-akismet") or []
+        self.assertTrue(wp_entries)
+        self.assertIn(
+            "/wp-content/plugins/akismet/readme.txt", wp_entries[0]["rule"]
+        )
+        self.assertEqual(wp_entries[0]["tier"], "T1")
 
     def test_payload_block_materializes_into_uri_anchors(self):
         # laravel-env has 22 /.env* payload variants but its raw `path:`
@@ -164,7 +171,7 @@ class TestBuild(unittest.TestCase):
         self.assertIn("paths", laravel["payload_names"])
         # Snort rules cover the actual .env file names.
         rules = result["signatures"]["snort"].get("laravel-env") or []
-        joined = "\n".join(rules)
+        joined = "\n".join(e["rule"] for e in rules)
         self.assertIn("/.env", joined)
 
     def test_lfi_payloads_survive_materialization_cap(self):
@@ -173,7 +180,7 @@ class TestBuild(unittest.TestCase):
         result = build_lookup(FIXTURES, source_url="fixtures")
         rules = result["signatures"]["snort"].get("generic-linux-lfi") or []
         # Should get multiple URI-anchored rules from the payload variants.
-        uri_rules = [r for r in rules if "http_uri" in r]
+        uri_rules = [e["rule"] for e in rules if "http_uri" in e["rule"]]
         self.assertGreaterEqual(len(uri_rules), 3)
         self.assertTrue(any("etc/passwd" in r for r in uri_rules))
 
