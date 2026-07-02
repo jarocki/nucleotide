@@ -7,6 +7,8 @@ import json
 import sys
 from pathlib import Path
 
+from .actor import fingerprint as actor_fingerprint
+from .actor import parse_events_jsonl, to_yaml
 from .build import build_lookup
 from .fetch import PROJECTDISCOVERY_REPO, fetch
 from .sigma import render_sigma, render_sigma_by_tier
@@ -103,6 +105,148 @@ def _lookup(args: argparse.Namespace) -> int:
     return 0
 
 
+def _fingerprint(args: argparse.Namespace) -> int:
+    lookup = json.loads(args.lookup.read_text())
+    events = parse_events_jsonl(str(args.events))
+    fp = actor_fingerprint(events, lookup, actor_id=args.actor_id)
+    text = to_yaml(fp)
+    if args.out:
+        args.out.write_text(text)
+        print(f"Wrote {args.out}", file=sys.stderr)
+    else:
+        sys.stdout.write(text + "\n")
+    return 0
+
+
+def _compare(args: argparse.Namespace) -> int:
+    from .actor import to_yaml as _to_yaml
+
+    a = _load_fingerprint(args.a)
+    b = _load_fingerprint(args.b)
+    diff = _diff_fingerprints(a, b)
+    print(_to_yaml(diff))
+    return 0
+
+
+def _match(args: argparse.Namespace) -> int:
+    lookup = json.loads(args.lookup.read_text())
+    events = parse_events_jsonl(str(args.events))
+    reference = _load_fingerprint(args.actor)
+    fresh = actor_fingerprint(events, lookup, actor_id="candidate")["actor_fingerprint"]
+    ref = reference["actor_fingerprint"]
+    score, findings = _match_score(ref, fresh)
+    result = {
+        "reference_actor": ref["id"],
+        "reference_hash": ref["structural_hash"],
+        "candidate_hash": fresh["structural_hash"],
+        "match_score": score,
+        "signals": findings,
+    }
+    print(to_yaml(result))
+    return 0
+
+
+def _load_fingerprint(path: Path) -> dict:
+    """Parse a fingerprint YAML back. We use a minimal parser that only
+    understands the shape our own dumper produces, to avoid pulling in a
+    YAML runtime dependency for input-side use."""
+    import yaml  # PyYAML is already a dep for parsing Nuclei templates.
+
+    return yaml.safe_load(path.read_text())
+
+
+def _diff_fingerprints(a: dict, b: dict) -> dict:
+    """Field-by-field diff of two fingerprint dicts.
+
+    Returns `{"identical": bool, "diverged_fields": {path: {a, b}}}`.
+    """
+    diverged: dict[str, dict] = {}
+    _diff_walk(a, b, [], diverged)
+    return {
+        "identical": not diverged,
+        "reference_hash_a": (a.get("actor_fingerprint") or {}).get("structural_hash"),
+        "reference_hash_b": (b.get("actor_fingerprint") or {}).get("structural_hash"),
+        "diverged_fields": diverged,
+    }
+
+
+def _diff_walk(a, b, path, out: dict) -> None:
+    if isinstance(a, dict) and isinstance(b, dict):
+        for k in sorted(set(a) | set(b)):
+            _diff_walk(a.get(k), b.get(k), path + [str(k)], out)
+        return
+    if a != b:
+        out[".".join(path)] = {"a": a, "b": b}
+
+
+def _match_score(reference: dict, candidate: dict) -> tuple[float, list[str]]:
+    """Score how well `candidate` matches `reference` (0.0-1.0)."""
+    findings: list[str] = []
+    supporting = 0
+    contradicting = 0
+
+    if reference.get("structural_hash") == candidate.get("structural_hash"):
+        findings.append("structural_hash identical")
+        return 1.0, findings
+
+    # Tool match
+    if (reference.get("tool_inference") or {}).get("likely_tool") == (
+        candidate.get("tool_inference") or {}
+    ).get("likely_tool"):
+        supporting += 1
+        findings.append("likely_tool matches")
+    else:
+        contradicting += 1
+        findings.append("likely_tool differs")
+
+    # Template subset overlap (Jaccard)
+    ref_templates = set(
+        (reference.get("template_preference") or {}).get("matched") or []
+    )
+    cand_templates = set(
+        (candidate.get("template_preference") or {}).get("matched") or []
+    )
+    if ref_templates or cand_templates:
+        overlap = len(ref_templates & cand_templates) / max(
+            1, len(ref_templates | cand_templates)
+        )
+        findings.append(
+            f"template Jaccard {overlap:.2f} "
+            f"({len(ref_templates & cand_templates)}/{len(ref_templates | cand_templates)})"
+        )
+        if overlap >= 0.5:
+            supporting += 1
+        elif overlap < 0.2:
+            contradicting += 1
+
+    # CLI option overlap on each field.
+    ref_cli = reference.get("inferred_cli_options") or {}
+    cand_cli = candidate.get("inferred_cli_options") or {}
+    for key in ("-severity", "-tags", "-random-agent", "-scan-strategy"):
+        if key not in ref_cli and key not in cand_cli:
+            continue
+        if ref_cli.get(key) == cand_cli.get(key):
+            supporting += 1
+            findings.append(f"{key} matches")
+        else:
+            contradicting += 1
+            findings.append(f"{key} differs (ref={ref_cli.get(key)!r} cand={cand_cli.get(key)!r})")
+
+    # Interactsh host
+    ref_ish = (ref_cli.get("-interactsh-server") or {}).get("host") if ref_cli.get("-interactsh-server") else None
+    cand_ish = (cand_cli.get("-interactsh-server") or {}).get("host") if cand_cli.get("-interactsh-server") else None
+    if ref_ish or cand_ish:
+        if ref_ish == cand_ish:
+            supporting += 1
+            findings.append(f"-interactsh-server matches ({ref_ish})")
+        else:
+            contradicting += 1
+            findings.append(f"-interactsh-server differs (ref={ref_ish} cand={cand_ish})")
+
+    score = max(0.0, min(1.0, 0.5 + 0.1 * supporting - 0.1 * contradicting))
+    return round(score, 2), findings
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="nucleotide",
@@ -185,6 +329,33 @@ def main(argv: list[str] | None = None) -> int:
         help="Minimum length for shared-path chunks considered in AMBIGUOUS lookup (default 8).",
     )
     look.set_defaults(func=_lookup)
+
+    fp = sub.add_parser(
+        "fingerprint",
+        help="Produce a portable actor fingerprint YAML from a batch of observation events.",
+    )
+    fp.add_argument("events", type=Path, help="Path to a JSONL file of observation events.")
+    fp.add_argument("--lookup", type=Path, required=True, help="Path to nucleotide-lookup.json.")
+    fp.add_argument("--out", type=Path, default=None, help="Write fingerprint here (default: stdout).")
+    fp.add_argument("--actor-id", type=str, default=None, help="Optional stable actor id; auto-derived from structural hash if omitted.")
+    fp.set_defaults(func=_fingerprint)
+
+    cmp = sub.add_parser(
+        "compare",
+        help="Diff two actor fingerprint YAML files field-by-field.",
+    )
+    cmp.add_argument("a", type=Path)
+    cmp.add_argument("b", type=Path)
+    cmp.set_defaults(func=_compare)
+
+    mch = sub.add_parser(
+        "match",
+        help="Score how well a fresh batch of events matches an existing actor fingerprint.",
+    )
+    mch.add_argument("events", type=Path)
+    mch.add_argument("actor", type=Path, help="Path to a reference actor fingerprint YAML.")
+    mch.add_argument("--lookup", type=Path, required=True)
+    mch.set_defaults(func=_match)
 
     args = p.parse_args(argv)
     return args.func(args)
