@@ -2,7 +2,7 @@
 
 Reverse-engineer threat-actor tool-and-CLI-option choices from observed
 [Nuclei](https://github.com/projectdiscovery/nuclei-templates) traffic and
-emit them as portable, diffable fingerprints — plus tier-scoped
+emit them as portable, diffable YAML fingerprints — plus tier-scoped
 Snort/Suricata + Sigma detection rules for the request and response
 surface every Nuclei template describes.
 
