@@ -40,7 +40,8 @@ it after the fact.
    behavior drifts over time — or share as intelligence.
 
 nucleotide is not a SIEM, not an IDS, and not a scanner. It is a
-generator of reusable artifacts.
+generator of reusable artifacts for detection, fingerprinting, and clustering
+of threat activity.
 
 ## Install
 
