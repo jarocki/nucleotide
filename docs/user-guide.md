@@ -2,13 +2,14 @@
 
 ## The problem
 
-Nuclei is one of the world's most widely used vulnerability probes. Its
+Nuclei is one of the world's most widely used vulnerability scanners. Its
 templates describe attack requests as YAML — which paths to hit, which
 headers to inject, which callback markers to place in the payload, and
 what a successful response looks like. Because the template set is
-public, attackers use it too. And because a template describes both the
+public, free, and easy to use, it is popular with all categories of threat actors.
+However, since a Nuclei template describes both the
 outgoing probe *and* the expected response, the traffic it produces is
-distinctive enough that a defender who has the same YAML can recognize
+distinctive enough that a defender who has the same YAML can match
 it after the fact.
 
 **nucleotide turns that idea into three concrete artifacts:**
