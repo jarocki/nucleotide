@@ -10,7 +10,8 @@ public, free, and easy to use, it is popular with all categories of threat actor
 However, since a Nuclei template describes both the
 outgoing probe *and* the expected response, the traffic it produces is
 distinctive enough that a defender who has the same YAML can match
-it after the fact.
+it after the fact -- and build durable fingerprints of repeated patterns
+of tool usage.
 
 **nucleotide turns that idea into three concrete artifacts:**
 
