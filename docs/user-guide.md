@@ -263,6 +263,8 @@ running the shell script directly.
 
 ### Demo 1 — build + lookup
 
+<img width="886" height="694" alt="build-and-lookup" src="https://github.com/user-attachments/assets/a4fee636-0d70-43af-8a6f-964ec8adea40" />
+
 ```sh
 asciinema play docs/demos/build-and-lookup.cast
 # or reproduce:
@@ -273,6 +275,8 @@ Walks through building a lookup + tier-scoped rule bundles, examining
 one Tier 5 (response-log) rule, and looking up a URL.
 
 ### Demo 2 — actor fingerprint
+
+<img width="886" height="694" alt="fingerprint-actor" src="https://github.com/user-attachments/assets/36627a3a-4732-4d25-8641-b9d58b150645" />
 
 ```sh
 asciinema play docs/demos/fingerprint-actor.cast
