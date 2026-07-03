@@ -30,15 +30,12 @@ import datetime
 import hashlib
 import io
 import json
-import math
 import re
 from collections import Counter
 from typing import Any, Iterable
-from urllib.parse import urlparse
 
 from .runtime import (
     NUCLEI_DEFAULT_OAST_HOSTS,
-    NUCLEI_DEFAULT_UA_EXAMPLE,
     is_default_oast_host,
     is_nuclei_default_ua,
     is_nuclei_random_agent_ua,

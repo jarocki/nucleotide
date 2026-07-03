@@ -243,14 +243,24 @@ def _match_score(reference: dict, candidate: dict) -> tuple[float, list[str]]:
             contradicting += 1
             findings.append(f"-interactsh-server differs (ref={ref_ish} cand={cand_ish})")
 
-    score = max(0.0, min(1.0, 0.5 + 0.1 * supporting - 0.1 * contradicting))
+    # Additive score with baseline 0.5. Contradictions weigh slightly more
+    # than supporting signals, and any contradiction at all caps the score
+    # below 1.0 -- we reserve 1.0 for structural_hash identity, handled
+    # above by the short-circuit.
+    raw = 0.5 + 0.1 * supporting - 0.15 * contradicting
+    score = max(0.0, min(0.95 if contradicting else 1.0, raw))
     return round(score, 2), findings
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="nucleotide",
-        description="Build a URL-snippet lookup table mapping observed URLs back to Nuclei templates.",
+        description=(
+            "Reverse-engineer threat-actor tool and CLI choices from "
+            "observed Nuclei traffic. Emits per-tier Snort/Suricata + "
+            "Sigma detection rules and portable actor-behavior "
+            "fingerprints."
+        ),
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 

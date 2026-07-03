@@ -1,9 +1,27 @@
 [project]
 name = "nucleotide"
-version = "0.1.0"
-description = "Build a URL-snippet lookup table that maps observed URLs back to the Nuclei template they came from."
+version = "1.0.0"
+description = "Reverse-engineer threat-actor tool + CLI choices from Nuclei traffic; emit tier-scoped Snort/Suricata + Sigma rules and portable actor fingerprints."
 requires-python = ">=3.10"
 dependencies = ["pyyaml>=6.0"]
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [{name = "John Jarocki"}]
+keywords = ["nuclei", "threat-hunting", "sigma", "snort", "suricata", "detection", "yara", "fingerprint"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
+
+[project.urls]
+Repository = "https://github.com/jarocki/nucleotide"
+Documentation = "https://github.com/jarocki/nucleotide/blob/main/docs/user-guide.md"
 
 [project.scripts]
 nucleotide = "nucleotide.cli:main"
