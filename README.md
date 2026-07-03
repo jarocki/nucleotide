@@ -31,11 +31,11 @@ cd nucleotide
 pip install -e .
 ```
 
-Requires Python 3.10+ and PyYAML. That's the only dependency.
+Requires Python 3.10+ and PyYAML. These the only dependencies.
 
 ## Demos
 
-Two asciicasts in `docs/demos/`:
+Two asciicasts demo videos are in `docs/demos/`:
 
 ```sh
 asciinema play docs/demos/build-and-lookup.cast
@@ -57,7 +57,7 @@ nucleotide build \
     --sigma-out-dir rules/sigma/
 ```
 
-Output on the 32 real Nuclei templates vendored with this project:
+Example output for 32 sampled Nuclei templates:
 
 ```
 Wrote lookup.json | templates=32 snippets=26 unresolved=2 yara=31
@@ -89,8 +89,8 @@ nucleotide compare  ref-actor.yml new-actor.yml
 nucleotide match    new-events.jsonl ref-actor.yml --lookup lookup.json
 ```
 
-Full walkthrough, JSONL event schema, tier taxonomy, output-format
-reference, and library API: **[`docs/user-guide.md`](docs/user-guide.md)**.
+A full usage walkthrough, JSONL event schema, tier taxonomy, output-format
+reference, and library API can be found in the User Guide: **[`docs/user-guide.md`](docs/user-guide.md)**.
 
 ## Signature tiers
 
