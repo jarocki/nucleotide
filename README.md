@@ -31,7 +31,7 @@ cd nucleotide
 pip install -e .
 ```
 
-Requires Python 3.10+ and PyYAML. These the only dependencies.
+Requires Python 3.10+ and PyYAML. These are the only dependencies.
 
 ## Demos
 
