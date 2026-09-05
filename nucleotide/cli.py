@@ -10,6 +10,7 @@ from pathlib import Path
 from .actor import fingerprint as actor_fingerprint
 from .actor import parse_events_jsonl, to_yaml
 from .build import build_lookup
+from .quality import at_least, match_quality
 from .fetch import PROJECTDISCOVERY_REPO, fetch
 from .sigma import render_sigma, render_sigma_by_tier
 from .signatures import TIERS, render_snort, render_snort_by_tier, render_yara
@@ -53,10 +54,17 @@ def _build(args: argparse.Namespace) -> int:
     snort_summary = " ".join(
         f"{t}={snort_by_tier[t]}" for t in TIERS if snort_by_tier[t]
     )
+    q = md.get("snippet_quality_counts", {})
+    quality_summary = (
+        f" quality[strong={q.get('strong',0)} "
+        f"medium={q.get('medium',0)} weak={q.get('weak',0)}]"
+        if q
+        else ""
+    )
     print(
         f"Wrote {args.out} | templates={md['template_count']} "
         f"snippets={md['resolved_snippets']} unresolved={md['unresolved_count']} "
-        f"yara={yara_n} snort[{snort_summary}]",
+        f"yara={yara_n} snort[{snort_summary}]{quality_summary}",
         file=sys.stderr,
     )
     return 0
@@ -67,6 +75,8 @@ def _lookup(args: argparse.Namespace) -> int:
     snippet_index: dict[str, str] = data.get("snippet_index", {})
     snippet_items = sorted(snippet_index.items(), key=lambda kv: -len(kv[0]))
     templates: dict[str, dict] = data.get("templates", {})
+    quality_map: dict[str, str] = data.get("snippet_quality", {})
+    min_quality = getattr(args, "min_quality", "weak")
 
     chunk_targets: list[tuple[str, str]] = []
     if not args.strict:
@@ -88,9 +98,16 @@ def _lookup(args: argparse.Namespace) -> int:
         printed_any = False
         for snip, tid in snippet_items:
             if snip in q:
+                graded = quality_map.get(snip) or templates.get(tid, {}).get(
+                    "snippet_quality"
+                ) or "weak"
+                quality = match_quality(snip, graded, q)
+                if not at_least(quality, min_quality):
+                    continue
+                verdict = "UNIQUE" if at_least(quality, "medium") else "WEAK"
                 meta = templates.get(tid, {})
                 print(
-                    f"{q}\tUNIQUE\t{tid}\t{snip}\t{meta.get('severity','')}\t{meta.get('name','')}"
+                    f"{q}\t{verdict}\t{tid}\t{snip}\t{meta.get('severity','')}\t{meta.get('name','')}\t{quality}"
                 )
                 printed_any = True
         for chunk, tid in chunk_targets:
@@ -108,7 +125,7 @@ def _lookup(args: argparse.Namespace) -> int:
 def _fingerprint(args: argparse.Namespace) -> int:
     lookup = json.loads(args.lookup.read_text())
     events = parse_events_jsonl(str(args.events))
-    fp = actor_fingerprint(events, lookup, actor_id=args.actor_id)
+    fp = actor_fingerprint(events, lookup, actor_id=args.actor_id, min_quality=args.min_quality)
     text = to_yaml(fp)
     if args.out:
         args.out.write_text(text)
@@ -132,7 +149,7 @@ def _match(args: argparse.Namespace) -> int:
     lookup = json.loads(args.lookup.read_text())
     events = parse_events_jsonl(str(args.events))
     reference = _load_fingerprint(args.actor)
-    fresh = actor_fingerprint(events, lookup, actor_id="candidate")["actor_fingerprint"]
+    fresh = actor_fingerprint(events, lookup, actor_id="candidate", min_quality=args.min_quality)["actor_fingerprint"]
     ref = reference["actor_fingerprint"]
     score, findings = _match_score(ref, fresh)
     result = {
@@ -185,7 +202,18 @@ def _match_score(reference: dict, candidate: dict) -> tuple[float, list[str]]:
     supporting = 0
     contradicting = 0
 
+    both_low_signal = reference.get("low_signal") and candidate.get("low_signal")
     if reference.get("structural_hash") == candidate.get("structural_hash"):
+        if both_low_signal:
+            # Identical hash on two signal-poor actors is weak evidence: the
+            # hash rests on inferred rate/strategy shape, not on trustworthy
+            # template or runtime signal. Report a capped, flagged score
+            # rather than asserting "same actor."
+            findings.append(
+                "structural_hash identical BUT both fingerprints are low-signal "
+                "(no trusted template hits, no Nuclei UA) -- identity is not established"
+            )
+            return 0.5, findings
         findings.append("structural_hash identical")
         return 1.0, findings
 
@@ -338,6 +366,14 @@ def main(argv: list[str] | None = None) -> int:
         default=8,
         help="Minimum length for shared-path chunks considered in AMBIGUOUS lookup (default 8).",
     )
+    look.add_argument(
+        "--min-quality",
+        choices=["weak", "medium", "strong"],
+        default="weak",
+        help="Minimum snippet-quality tier for a UNIQUE hit. 'weak' (default) "
+        "reports all but labels sub-medium hits as WEAK; 'medium' suppresses "
+        "coincidental mid-token fragments; 'strong' keeps only long anchored snippets.",
+    )
     look.set_defaults(func=_lookup)
 
     fp = sub.add_parser(
@@ -348,6 +384,14 @@ def main(argv: list[str] | None = None) -> int:
     fp.add_argument("--lookup", type=Path, required=True, help="Path to nucleotide-lookup.json.")
     fp.add_argument("--out", type=Path, default=None, help="Write fingerprint here (default: stdout).")
     fp.add_argument("--actor-id", type=str, default=None, help="Optional stable actor id; auto-derived from structural hash if omitted.")
+    fp.add_argument(
+        "--min-quality",
+        choices=["weak", "medium", "strong"],
+        default="medium",
+        help="Snippet-quality floor for a template hit to drive tool/CLI inference "
+        "and the structural hash (default medium). Hits below the floor are "
+        "reported under weak_only_matches only.",
+    )
     fp.set_defaults(func=_fingerprint)
 
     cmp = sub.add_parser(
@@ -365,6 +409,14 @@ def main(argv: list[str] | None = None) -> int:
     mch.add_argument("events", type=Path)
     mch.add_argument("actor", type=Path, help="Path to a reference actor fingerprint YAML.")
     mch.add_argument("--lookup", type=Path, required=True)
+    mch.add_argument(
+        "--min-quality",
+        choices=["weak", "medium", "strong"],
+        default="medium",
+        help="Snippet-quality floor for a template hit to drive tool/CLI inference "
+        "and the structural hash (default medium). Hits below the floor are "
+        "reported under weak_only_matches only.",
+    )
     mch.set_defaults(func=_match)
 
     args = p.parse_args(argv)

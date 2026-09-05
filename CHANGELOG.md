@@ -3,6 +3,110 @@
 All notable changes to nucleotide are logged here. The project follows
 [Semantic Versioning](https://semver.org).
 
+## 2.0.0 — 2026-09-04
+
+Quality-graded snippets, generic-token stop, match-time anchoring, and
+low-signal actor handling. Motivated by false-positive template matches
+found when running 1.0.0 against real capture data. The full analysis,
+with every figure measured and the commands that produced it, is in
+`docs/v2.0.0-analysis/`.
+
+### Why a major version
+
+- `lookup` output gains a seventh column (snippet quality); scripts that
+  parse by position will break.
+- Fingerprints gain `low_signal` and `template_preference.weak_only_matches`.
+- Structural hashes change for actors with no trustworthy template hits
+  (rate limit, header names, scan strategy, User-Agent shapes, and URI
+  shapes are folded in), so 1.0.0 hashes and `actor-<hash>` ids for those
+  actors do not carry over.
+- `classify_event` and `fingerprint` take a `min_quality` keyword and
+  return/use `trustworthy_templates`; attribution no longer reads
+  `matched_templates`.
+- Lookups built by 1.0.0 load in 2.0.0 (every snippet is treated as WEAK);
+  lookups built by 2.0.0 are not usable by 1.0.0.
+- Snippet selection changed for many templates; a 2.0.0 lookup is not
+  byte-comparable with a 1.0.0 lookup.
+
+### Added
+
+- `nucleotide/quality.py`: `snippet_quality(snippet, parent_chunks)` grades
+  a snippet WEAK, MEDIUM, or STRONG. Anchoring on path boundaries
+  (`/?=&.:;,%+` and space) is the primary axis; STRONG = anchored and
+  ≥ 8 bytes; MEDIUM = anchored and not a generic token, or unanchored and
+  ≥ 12 bytes. `is_generic_token` stops snippets under 8 bytes whose every
+  alphanumeric segment is hex-only or a common English word.
+  `match_quality(snippet, grade, uri)` downgrades a hit to WEAK when a
+  snippet under 12 bytes lands mid-token in the URI. `edge_anchored` is
+  the single anchoring implementation, shared with `snippets.py`; a `%`
+  followed by a hex pair is not a left boundary.
+- `nucleotide/data/common-words.txt`: 28,338 alphabetic English words with
+  Zipf frequency ≥ 3.0, generated from wordfreq 3.1.1 by
+  `nucleotide/data/regen_common_words.py` (wordfreq is not a runtime
+  dependency; the list is vendored).
+- `lookup --min-quality {weak,medium,strong}` (default `weak`: report
+  everything, label it). `fingerprint --min-quality` and
+  `match --min-quality` (default `medium`).
+- Fingerprint field `low_signal`: true when there are no template hits at
+  or above `min_quality` and no Nuclei UA or default-OAST signal.
+- Fingerprint field `template_preference.weak_only_matches`.
+- `actor.shape_of_path`, `infer_path_shapes`, `shape_of_ua`,
+  `infer_ua_shapes`: URI and User-Agent shapes (IPv4 → `A`, hex runs ≥ 8
+  → `H`, base64-like runs ≥ 16 → `B`, digits → `N`) used as low-signal
+  hash discriminators.
+- Build summary prints `quality[strong=N medium=N weak=N]`; the lookup JSON
+  carries `snippet_quality` per template and a top-level
+  `snippet_quality_map`.
+- Tests: `tests/test_quality.py` (18), `tests/test_regression_false_positives.py`
+  (14), one in `tests/test_snippets.py`. 137 tests total, up from 104.
+  Line coverage of `nucleotide/*`: 88%.
+
+### Changed
+
+- `snippets.py`: two-pass selection — shortest anchored, non-generic unique
+  substring first; unanchored fallback only when no such candidate exists.
+  On the 13,611-template corpus: `wordpress-akismet` `s/ak` → `akismet`;
+  `httpbin-xss` `e64/` → a 60-byte `base64/…` string; `open-proxy-internal`
+  `//19` → `/ntp`; `redis-config` `edis` → `redis`;
+  `filebrowser-login-panel` `on-3` → `img/icons`; `landray-eis-ws-infoleak`
+  `WS/B` → `WS/Basic`; `CVE-2023-40748` `%3dc` → `6100%3d6100`. Quality
+  distribution: strong 5,303 / medium 1,620 / weak 29 (of 6,952 resolved).
+- `actor.py`: tool inference, `-severity`, and `-tags` use hits at or above
+  `min_quality` only; `_match_score` caps at 0.5 when both fingerprints are
+  `low_signal`.
+- `build`: 85.5 s → 94.9 s on the corpus above (single runs).
+
+### Measured effect on capture data (details in docs/v2.0.0-analysis/)
+
+- Log4Shell, 65 distinct URIs: UNIQUE rows 88 → 1 (the two 1.0.0 fragments
+  `//19` and `e64/`, 41 URIs each, are gone; the remaining row is
+  `img/favicon` on a favicon request).
+- galah, 62 distinct URIs: UNIQUE rows 37 → 18; 33 of the 34 distinct
+  1.0.0 snippets were 4–5 bytes long and none remain.
+- Eleven Log4Shell actors: all 11 are `unknown` and `low_signal` with no
+  inferred `-severity`/`-tags` (1.0.0: 2 labelled `nuclei` at 0.6); 9
+  distinct structural hashes (1.0.0: 3, with 9 actors sharing one). The
+  two pairs that share a hash have identical UA shapes, URI shapes, and
+  rate limit.
+- An intermediate build with anchoring but without the generic-token stop
+  and match-time check was measured and rejected: on Log4Shell it replaced
+  `//19`/`e64/` with `Basic` (41 URIs) and `6100` (11) and left the same
+  two actors labelled `nuclei`. Its figures are kept in the analysis for
+  comparison.
+
+### Known limitations
+
+- Short anchored tokens that are neither hex nor common English words
+  (`/ntp`, `/SDK`, `m3u8`) still grade MEDIUM; `--min-quality strong` is
+  the conservative gate.
+- The common-word list is English only; product names that are also
+  common words (`telescope`, `pools`) are stopped.
+- Percent-encoded input is not decoded before snippet selection.
+- Low-signal discriminators cannot separate actors with identical UA
+  shapes, URI shapes, and rate limit.
+- No genuine Nuclei actor exists in either capture set; Nuclei-UA
+  attribution is covered by unit tests only.
+
 ## 1.0.0 — 2026-07-03
 
 First stable release. The scope has expanded well beyond the initial

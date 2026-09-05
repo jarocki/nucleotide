@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import datetime
 import subprocess
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from .quality import snippet_quality
 from .fingerprint import extract_fingerprints
 from .parse import (
     extract_literal_chunks,
@@ -64,11 +66,24 @@ def build_lookup(
 
     http_corpus = {tid: chunks for tid, chunks in corpus.items() if chunks}
     snippets, unresolved = compute_unique_snippets(http_corpus, min_len=min_snippet_len)
+
+    # Grade every resolved snippet by attribution trustworthiness (length +
+    # anchoring). A 4-byte fragment sliced from the middle of a longer
+    # literal is "unique" but not trustworthy; recording the tier lets
+    # `lookup` and actor inference gate on it instead of trusting blindly.
+    snippet_quality_map: dict[str, str] = {}
+    for tid, snip in snippets.items():
+        q = snippet_quality(snip, http_corpus.get(tid, []))
+        templates[tid]["url_snippet"] = snip
+        templates[tid]["snippet_quality"] = q
+        snippet_quality_map[snip] = q
     for tid in templates:
-        templates[tid]["url_snippet"] = snippets.get(tid)
+        templates[tid].setdefault("url_snippet", snippets.get(tid))
+        templates[tid].setdefault("snippet_quality", None)
 
     snippet_index = {snip: tid for tid, snip in snippets.items()}
     no_url_count = sum(1 for chunks in corpus.values() if not chunks)
+    quality_counts = Counter(snippet_quality_map.values())
 
     result = {
         "metadata": {
@@ -81,9 +96,11 @@ def build_lookup(
             "unresolved_count": len(unresolved),
             "no_url_template_count": no_url_count,
             "min_snippet_len": min_snippet_len,
+            "snippet_quality_counts": dict(quality_counts),
         },
         "templates": templates,
         "snippet_index": snippet_index,
+        "snippet_quality": snippet_quality_map,
         "unresolved": unresolved,
     }
     result["signatures"] = build_signatures(result)

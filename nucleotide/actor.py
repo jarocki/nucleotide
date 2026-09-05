@@ -34,6 +34,7 @@ import re
 from collections import Counter
 from typing import Any, Iterable
 
+from .quality import MEDIUM, at_least, match_quality
 from .runtime import (
     NUCLEI_DEFAULT_OAST_HOSTS,
     is_default_oast_host,
@@ -78,12 +79,23 @@ def parse_events_jsonl(path_or_text: str) -> list[dict[str, Any]]:
 # ---- Per-event template classification --------------------------------
 
 
-def classify_event(event: dict[str, Any], lookup: dict[str, Any]) -> dict[str, Any]:
+def classify_event(
+    event: dict[str, Any],
+    lookup: dict[str, Any],
+    *,
+    min_quality: str = MEDIUM,
+) -> dict[str, Any]:
     """Match a single observation event against the template lookup.
+
+    `min_quality` is the floor a hit must reach, *as matched in this URI*,
+    to count as trustworthy (default MEDIUM). A snippet's build-time grade
+    is downgraded to WEAK for a hit where the snippet lands mid-token in
+    the URI (see `quality.match_quality`).
 
     Returns a dict with:
       - `matched_templates`: list of template ids whose URI snippet appears
         in the event's URI
+      - `trustworthy_templates`: the subset whose hit meets `min_quality`
       - `oast_hosts`: set of hostnames of OAST callback URLs seen in the
         event (drawn from headers, body, and cookies if present)
       - `runtime_signals`: dict of runtime-fingerprint findings, each a
@@ -92,10 +104,21 @@ def classify_event(event: dict[str, Any], lookup: dict[str, Any]) -> dict[str, A
     """
     uri = str(event.get("uri") or event.get("url") or "")
     matched: list[str] = []
+    strong_matched: list[str] = []
     snippet_index: dict[str, str] = lookup.get("snippet_index") or {}
+    quality_map: dict[str, str] = lookup.get("snippet_quality") or {}
+    templates: dict[str, dict] = lookup.get("templates") or {}
     for snippet, tid in sorted(snippet_index.items(), key=lambda kv: -len(kv[0])):
         if snippet and snippet in uri:
             matched.append(tid)
+            graded = quality_map.get(snippet) or (
+                templates.get(tid, {}).get("snippet_quality")
+            ) or "weak"
+            # The grade must survive where the snippet lands in *this* URI:
+            # `6100` is anchored in its template but not inside a hex string.
+            quality = match_quality(snippet, graded, uri)
+            if at_least(quality, min_quality):
+                strong_matched.append(tid)
 
     ua = str(event.get("ua") or event.get("user_agent") or "")
     oast_hosts: set[str] = set()
@@ -125,6 +148,7 @@ def classify_event(event: dict[str, Any], lookup: dict[str, Any]) -> dict[str, A
 
     return {
         "matched_templates": matched,
+        "trustworthy_templates": strong_matched,
         "oast_hosts": sorted(oast_hosts),
         "runtime_signals": {
             "ua_matches_nuclei_default": is_nuclei_default_ua(ua),
@@ -349,6 +373,44 @@ def infer_scan_strategy(events: list[dict[str, Any]]) -> str | None:
     return "mixed"
 
 
+_DIGITS = re.compile(r"[0-9]+")
+_HEXRUN = re.compile(r"[0-9a-fA-F]{8,}")
+_B64RUN = re.compile(r"[A-Za-z0-9+/=]{16,}")
+_IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
+
+def shape_of_path(uri: str, *, max_len: int = 64) -> str:
+    """Collapse the variable parts of a URI into a reusable shape.
+
+    IPv4 addresses -> ``A``, hex runs of 8+ -> ``H``, base64-like runs of
+    16+ -> ``B``, remaining digit runs -> ``N``; truncated to `max_len`.
+    Two sprayers using the same payload template produce the same shape;
+    two using different templates do not.
+    """
+    s = _IPV4.sub("A", uri)
+    s = _HEXRUN.sub("H", s)
+    s = _B64RUN.sub("B", s)
+    s = _DIGITS.sub("N", s)
+    return s[:max_len]
+
+
+def infer_path_shapes(events: list[dict[str, Any]], *, limit: int = 8) -> list[str]:
+    """Sorted set of distinct URI shapes (capped at `limit`) across the batch."""
+    shapes = {shape_of_path(str(e.get("uri") or e.get("url") or "")) for e in events}
+    return sorted(shapes)[:limit]
+
+
+def shape_of_ua(ua: str) -> str:
+    """User-Agent with version numbers collapsed: ``curl/7.58.0`` -> ``curl/N.N.N``."""
+    return _DIGITS.sub("N", ua)[:80]
+
+
+def infer_ua_shapes(events: list[dict[str, Any]], *, limit: int = 8) -> list[str]:
+    """Sorted set of distinct User-Agent shapes (capped at `limit`) across the batch."""
+    shapes = {shape_of_ua(str(e.get("ua") or e.get("user_agent") or "")) for e in events}
+    return sorted(shapes)[:limit]
+
+
 def _runlength(seq: list[str]) -> list[int]:
     if not seq:
         return []
@@ -391,17 +453,19 @@ def fingerprint(
     lookup: dict[str, Any],
     *,
     actor_id: str | None = None,
+    min_quality: str = MEDIUM,
 ) -> dict[str, Any]:
     """Produce the actor fingerprint dict for a batch of events.
 
     `lookup` is the JSON produced by `nucleotide build`. `events` is the
     operator's pre-grouped list of observation dicts. `actor_id`, when
-    absent, is derived from window + structural_hash.
+    absent, is derived from window + structural_hash. `min_quality` is the
+    snippet-quality floor for a template hit to drive attribution.
     """
     # Classify each event once so downstream inference doesn't rescan.
     classified: list[dict[str, Any]] = []
     for ev in events:
-        clf = classify_event(ev, lookup)
+        clf = classify_event(ev, lookup, min_quality=min_quality)
         # Enrich the event so scan-strategy inference can see matches.
         ev = {**ev, "matched_templates": clf["matched_templates"]}
         classified.append({"event": ev, "classification": clf})
@@ -413,6 +477,20 @@ def fingerprint(
     ]
     hit_counts = Counter(hit_ids)
     unique_hits = sorted(hit_counts)
+
+    # Trustworthy hits (medium+ snippet quality) are the only ones allowed to
+    # drive tool/CLI inference and the structural hash. Weak hits -- short
+    # mid-token fragments -- are still *reported* under template_preference so
+    # the operator sees them, but they never flip likely_tool or fabricate
+    # CLI options from a coincidental substring match.
+    trust_ids = [
+        tid
+        for c in classified
+        for tid in c["classification"].get("trustworthy_templates", [])
+    ]
+    trust_counts = Counter(trust_ids)
+    trusted_hits = sorted(trust_counts)
+    weak_only_hits = sorted(set(unique_hits) - set(trusted_hits))
 
     # -- Tool inference --------------------------------------------------
     ua_default_hits = sum(
@@ -440,15 +518,26 @@ def fingerprint(
     if oast_default_hits > 0:
         tool_supporting += 1
         tool_signals.append("OAST callbacks resolve to a default interactsh host")
-    if unique_hits:
+    if trusted_hits:
         tool_supporting += 1
-        tool_signals.append(f"traffic matched {len(unique_hits)} known Nuclei template(s)")
+        tool_signals.append(
+            f"traffic matched {len(trusted_hits)} known Nuclei template(s) "
+            f"on medium+ quality snippets"
+        )
 
     tool_contradicting = 0
     tool_contradiction_signals: list[str] = []
     if oast_seen and oast_default_hits == 0:
         tool_contradicting += 1
         tool_contradiction_signals.append("OAST callbacks resolve to a non-default host (custom -interactsh-server)")
+    # Weak-only matches are a red herring, not evidence: surface them as an
+    # explicit non-signal so an operator isn't left wondering why a template
+    # that "hit" didn't raise confidence.
+    if weak_only_hits and not trusted_hits:
+        tool_contradiction_signals.append(
+            f"{len(weak_only_hits)} template hit(s) rest on weak (short, unanchored) "
+            f"snippets only -- treated as coincidental, not attribution"
+        )
 
     tool_confidence = _confidence(tool_supporting, tool_contradicting)
     likely_tool = "nuclei" if tool_confidence >= 0.6 else "unknown"
@@ -456,13 +545,15 @@ def fingerprint(
     # Non-Nuclei-tool hypothesis: known templates hit but no Nuclei runtime
     # signals -> possible different tool consuming the same YAMLs.
     nn_signals: list[str] = []
-    if unique_hits and ua_default_hits == 0 and ua_random_pool_hits == 0:
+    if trusted_hits and ua_default_hits == 0 and ua_random_pool_hits == 0:
         nn_signals.append("known templates hit but no Nuclei-shaped UA observed")
     non_nuclei_confidence = _confidence(len(nn_signals), tool_supporting)
 
     # -- CLI-option inference --------------------------------------------
-    severity_filter = infer_severity_filter(unique_hits, lookup)
-    tags_filter = infer_tags_filter(unique_hits, lookup)
+    # Severity/tags are inferred only from trustworthy template hits; a
+    # coincidental fragment must not fabricate a -severity or -tags filter.
+    severity_filter = infer_severity_filter(trusted_hits, lookup)
+    tags_filter = infer_tags_filter(trusted_hits, lookup)
     custom_headers = infer_custom_headers([c["event"] for c in classified])
     random_agent = infer_random_agent([c["event"] for c in classified])
     interactsh = infer_interactsh_server([c["event"] for c in classified])
@@ -507,6 +598,15 @@ def fingerprint(
     )
 
     # -- Structural hash + id --------------------------------------------
+    # An actor is "low signal" when nothing trustworthy pins it down: no
+    # trusted template hits and no Nuclei runtime signal. Such actors must
+    # NOT collapse to a single shared hash (which would let `compare` declare
+    # nine distinct sprayers "identical"). We fold discriminating runtime
+    # shape -- inferred rate-limit and custom-header names -- into the hash,
+    # and flag the fingerprint so `compare`/`match` can refuse identity.
+    low_signal = not trusted_hits and ua_default_hits == 0 and ua_random_pool_hits == 0
+    ua_shapes = infer_ua_shapes([c["event"] for c in classified])
+    path_shapes = infer_path_shapes([c["event"] for c in classified])
     structural_fields = {
         "likely_tool": likely_tool,
         "cli": {
@@ -517,8 +617,19 @@ def fingerprint(
             "-interactsh-server": (interactsh or {}).get("host"),
             "-scan-strategy": scan_strategy,
         },
-        "template_subset": unique_hits,
+        "template_subset": trusted_hits,
     }
+    if low_signal:
+        # Discriminators that would otherwise be washed out of the hash for
+        # signal-poor actors. Rate-limit bucket + sorted custom-header names
+        # keep genuinely different sprayers apart.
+        structural_fields["low_signal_discriminators"] = {
+            "rate_limit": rate_limit,
+            "header_names": sorted(h["name"] for h in custom_headers),
+            "scan_strategy": scan_strategy,
+            "ua_shapes": ua_shapes,
+            "path_shapes": path_shapes,
+        }
     structural_hash = _structural_hash(structural_fields)
     if actor_id is None:
         actor_id = f"actor-{structural_hash.split(':',1)[1][:12]}"
@@ -527,6 +638,7 @@ def fingerprint(
         "actor_fingerprint": {
             "id": actor_id,
             "structural_hash": structural_hash,
+            "low_signal": low_signal,
             "window": window,
             "events_analyzed": len(events),
             "tool_inference": {
@@ -551,8 +663,11 @@ def fingerprint(
                 "-scan-strategy": scan_strategy,
             },
             "template_preference": {
-                "matched": unique_hits,
-                "hits_by_template": dict(hit_counts.most_common()),
+                "matched": trusted_hits,
+                "hits_by_template": {
+                    tid: n for tid, n in hit_counts.most_common() if tid in trusted_hits
+                },
+                "weak_only_matches": weak_only_hits,
                 "novel_probes": len(novel_probes),
                 "novel_probe_examples": novel_probes[:8],
             },

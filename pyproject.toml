@@ -1,6 +1,6 @@
 [project]
 name = "nucleotide"
-version = "1.0.0"
+version = "2.0.0"
 description = "Reverse-engineer threat-actor tool + CLI choices from Nuclei traffic; emit tier-scoped Snort/Suricata + Sigma rules and portable actor fingerprints."
 requires-python = ">=3.10"
 dependencies = ["pyyaml>=6.0"]
@@ -32,3 +32,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["nucleotide*"]
+
+[tool.setuptools.package-data]
+"nucleotide.data" = ["common-words.txt"]

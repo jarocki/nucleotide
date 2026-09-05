@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>nucleotide 1.0.0 → 2.0.0 — measured results</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #222; background: #f6f6f6; margin: 0; line-height: 1.5; }
+  .wrap { max-width: 1080px; margin: 0 auto; background: #fff; padding: 0 0 40px; }
+  header { background: #1f2a44; color: #fff; padding: 36px 40px; }
+  header h1 { margin: 0 0 6px; font-weight: 400; font-size: 1.8em; }
+  header p { margin: 0; opacity: .85; }
+  section { padding: 28px 40px; border-bottom: 1px solid #e6e6e6; }
+  h2 { color: #1f2a44; margin-top: 0; }
+  .chart { position: relative; height: 320px; margin: 18px 0 8px; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: .93em; }
+  th { background: #1f2a44; color: #fff; text-align: left; padding: 8px 10px; }
+  td { padding: 7px 10px; border-bottom: 1px solid #e6e6e6; }
+  code { font-family: Menlo, Consolas, monospace; font-size: .92em; background: #f0f0f0; padding: 1px 4px; border-radius: 3px; }
+  .note { background: #eef3fb; border-left: 4px solid #1f2a44; padding: 12px 16px; margin: 14px 0; }
+  .cap { font-size: .85em; color: #666; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>nucleotide 1.0.0 → 2.0.0: measured results</h1>
+  <p>Three builds, same corpus (13,611 templates), same capture sets, measured 2026-09-04. "Anchoring only" is an unreleased intermediate. Commands in <code>docs/v2.0.0-analysis/MEASUREMENTS.md</code>.</p>
+</header>
+
+<section>
+  <h2>Snippet quality on the full corpus (6,952 resolved snippets)</h2>
+  <div class="chart"><canvas id="quality"></canvas></div>
+  <p class="cap">2.0.0 has 29 WEAK snippets: templates whose only short anchored candidates were bare numbers or common words, which fell to the unanchored fallback.</p>
+</section>
+
+<section>
+  <h2>Log4Shell capture: UNIQUE rows over 65 distinct URIs</h2>
+  <div class="chart"><canvas id="l4s"></canvas></div>
+  <table>
+    <tr><th>Build</th><th>UNIQUE</th><th>WEAK</th><th>NO_MATCH</th><th>Dominant UNIQUE snippets</th></tr>
+    <tr><td>1.0.0</td><td>88</td><td>—</td><td>16</td><td><code>//19</code> ×41, <code>e64/</code> ×41</td></tr>
+    <tr><td>anchoring only</td><td>55</td><td>0</td><td>6</td><td><code>Basic</code> ×41, <code>6100</code> ×11</td></tr>
+    <tr><td>2.0.0</td><td>1</td><td>1</td><td>58</td><td><code>img/favicon</code> ×1</td></tr>
+    <tr><td>2.0.0 <code>--min-quality strong</code></td><td>1</td><td>0</td><td>59</td><td><code>img/favicon</code> ×1</td></tr>
+  </table>
+  <div class="note">58 AMBIGUOUS rows on <code>/favicon.ico</code> appear in every build and are not charted.</div>
+</section>
+
+<section>
+  <h2>galah capture: UNIQUE rows over 62 distinct URIs</h2>
+  <div class="chart"><canvas id="galah"></canvas></div>
+  <p class="cap">1.0.0: 37 rows, 33 of 34 distinct snippets 4–5 bytes long. 2.0.0: 18 rows (10 STRONG, 8 MEDIUM) plus 3 WEAK. 144 AMBIGUOUS rows in every build are not charted. No ground truth is available for galah.</p>
+</section>
+
+<section>
+  <h2>Eleven Log4Shell actors (≥ 15 events each)</h2>
+  <div class="chart"><canvas id="actors"></canvas></div>
+  <table>
+    <tr><th>Metric</th><th>1.0.0</th><th>anchoring only</th><th>2.0.0</th></tr>
+    <tr><td>Actors labelled <code>nuclei</code> (no Nuclei UA/OAST present)</td><td>2</td><td>2</td><td>0</td></tr>
+    <tr><td>Distinct structural hashes among the 11</td><td>3</td><td>4</td><td>9</td></tr>
+    <tr><td>Actors flagged <code>low_signal</code></td><td>n/a</td><td>9</td><td>11</td></tr>
+    <tr><td>Actors with a non-empty <code>-severity</code></td><td>2</td><td>2</td><td>0</td></tr>
+  </table>
+  <p class="cap">The two 2.0.0 hash-sharing pairs have identical User-Agent shapes, URI shapes, and rate limit.</p>
+</section>
+
+<section>
+  <h2>Tests, coverage, timing</h2>
+  <div class="chart"><canvas id="tests"></canvas></div>
+  <table>
+    <tr><th>Measure</th><th>1.0.0</th><th>anchoring only</th><th>2.0.0</th></tr>
+    <tr><td>Tests passing</td><td>104</td><td>122</td><td>137</td></tr>
+    <tr><td>Line coverage, <code>nucleotide/*</code></td><td>not measured</td><td>87%</td><td>88% (86% with branches)</td></tr>
+    <tr><td><code>build</code>, 13,611 templates</td><td>85.5 s</td><td>116.1 s</td><td>94.9 s</td></tr>
+    <tr><td><code>lookup</code>, 65 URIs</td><td>0.89 s</td><td>0.56 s</td><td>0.62 s</td></tr>
+    <tr><td><code>fingerprint</code>, 116 events</td><td>0.76 s</td><td>0.81 s</td><td>0.72 s</td></tr>
+  </table>
+  <p class="cap">Single runs. Lookup and fingerprint are dominated by loading a 56 MB lookup JSON; sub-second differences are noise.</p>
+</section>
+
+<script>
+const navy='#1f2a44', red='#b02020', green='#2a7a2a', amber='#d9a400', grey='#9a9a9a', mid='#6b7a99';
+const three=(a,b,c)=>[grey,mid,navy];
+new Chart(document.getElementById('quality'),{type:'bar',data:{labels:['strong','medium','weak'],datasets:[{label:'anchoring only',data:[4254,2696,2],backgroundColor:mid},{label:'2.0.0',data:[5303,1620,29],backgroundColor:navy}]},options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:'Snippet quality by build'}},scales:{y:{beginAtZero:true}}}});
+new Chart(document.getElementById('l4s'),{type:'bar',data:{labels:['1.0.0','anchoring only','2.0.0','2.0.0 --min-quality strong'],datasets:[{label:'UNIQUE rows',data:[88,55,1,1],backgroundColor:red},{label:'NO_MATCH rows',data:[16,6,58,59],backgroundColor:grey}]},options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:'Log4Shell lookup, 65 URIs'}},scales:{y:{beginAtZero:true}}}});
+new Chart(document.getElementById('galah'),{type:'bar',data:{labels:['1.0.0','anchoring only','2.0.0'],datasets:[{label:'UNIQUE rows',data:[37,23,18],backgroundColor:red},{label:'WEAK rows',data:[0,1,3],backgroundColor:amber},{label:'NO_MATCH rows',data:[23,29,30],backgroundColor:grey}]},options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:'galah lookup, 62 URIs'}},scales:{y:{beginAtZero:true}}}});
+new Chart(document.getElementById('actors'),{type:'bar',data:{labels:['labelled nuclei','distinct hashes (of 11)','flagged low_signal'],datasets:[{label:'1.0.0',data:[2,3,0],backgroundColor:grey},{label:'anchoring only',data:[2,4,9],backgroundColor:mid},{label:'2.0.0',data:[0,9,11],backgroundColor:navy}]},options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:'Actor-level outcomes, 11 actors'}},scales:{y:{beginAtZero:true,max:11}}}});
+new Chart(document.getElementById('tests'),{type:'bar',data:{labels:['tests passing','build seconds'],datasets:[{label:'1.0.0',data:[104,85.5],backgroundColor:grey},{label:'anchoring only',data:[122,116.1],backgroundColor:mid},{label:'2.0.0',data:[137,94.9],backgroundColor:navy}]},options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:'Tests and build time'}},scales:{y:{beginAtZero:true}}}});
+</script>
+</div>
+</body>
+</html>

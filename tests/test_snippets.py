@@ -20,17 +20,35 @@ class TestSnippets(unittest.TestCase):
                     continue
                 self.assertFalse(any(snip in c for c in corpus[other]))
 
-    def test_prefers_shortest(self):
+    def test_prefers_shortest_anchored(self):
+        # Selection prefers the shortest *anchored* unique substring over a
+        # shorter mid-token fragment. Both templates differ only by the token
+        # after `/zzz/`; the chosen snippet must be uniquely identifying and
+        # must sit on a path boundary rather than slicing across one.
         corpus = {
-            "a": ["/zzz/very-distinctive-a-token/end"],
-            "b": ["/zzz/very-distinctive-b-token/end"],
+            "a": ["/zzz/aaa-distinctive/end"],
+            "b": ["/zzz/bbb-distinctive/end"],
         }
         snippets, _ = compute_unique_snippets(corpus, min_len=3, max_len=40)
-        # min_len is 3 and a single distinguishing character exists, so picks length 3.
-        self.assertEqual(len(snippets["a"]), 3)
-        self.assertEqual(len(snippets["b"]), 3)
-        self.assertIn(snippets["a"], "/zzz/very-distinctive-a-token/end")
-        self.assertNotIn(snippets["a"], "/zzz/very-distinctive-b-token/end")
+        self.assertIn(snippets["a"], "/zzz/aaa-distinctive/end")
+        self.assertNotIn(snippets["a"], "/zzz/bbb-distinctive/end")
+        # The snippet is anchored: it starts at a boundary and does not begin
+        # mid-token (i.e. not a bare 'aa' slice inside 'aaa').
+        chunk = "/zzz/aaa-distinctive/end"
+        idx = chunk.find(snippets["a"])
+        self.assertTrue(idx == 0 or chunk[idx - 1] in "/?=&.:;,%+ ")
+
+    def test_falls_back_to_unanchored_when_no_anchored_unique(self):
+        # If no anchored substring is unique, selection still resolves the
+        # template on the shortest unique (unanchored) substring rather than
+        # dropping it as unresolved.
+        corpus = {
+            "a": ["/samepath/xQ"],
+            "b": ["/samepath/xR"],
+        }
+        snippets, unresolved = compute_unique_snippets(corpus, min_len=2, max_len=40)
+        self.assertEqual(set(snippets), {"a", "b"})
+        self.assertEqual(unresolved, [])
 
     def test_collision_unresolved(self):
         corpus = {"a": ["/foo"], "b": ["/foo"]}

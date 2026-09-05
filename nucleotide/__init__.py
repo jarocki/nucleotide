@@ -16,7 +16,7 @@ Public API (stable):
 See docs/user-guide.md for the full walkthrough.
 """
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 from .actor import fingerprint, parse_events_jsonl, to_yaml
 from .build import build_lookup

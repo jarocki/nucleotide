@@ -70,8 +70,13 @@ Wrote lookup.json | templates=32 snippets=26 unresolved=2 yara=31
 $ nucleotide lookup lookup.json \
       https://victim.example/wp-content/plugins/akismet/readme.txt
 https://victim.example/wp-content/plugins/akismet/readme.txt \
-  UNIQUE  wordpress-akismet  s/ak  info  Akismet Anti-spam' ...
+  UNIQUE  wordpress-akismet  akismet  info  Akismet Anti-spam' ...  medium
 ```
+
+The last column is the snippet's quality grade (`weak`, `medium`,
+`strong`); `--min-quality strong` restricts output to long anchored
+snippets. See `docs/v2.0.0-analysis/ANALYSIS.md` for what the grades mean
+and how they were validated.
 
 **Fingerprint an actor from a batch of events:**
 
@@ -139,7 +144,7 @@ For every template in the corpus:
 python -m unittest discover -s tests
 ```
 
-104 tests, all against real Nuclei templates vendored under
+137 tests, all against real Nuclei templates vendored under
 `tests/fixtures/` (see [that directory's README](tests/fixtures/README.md)
 for per-fixture notes on what each one exercises).
 
